@@ -13,20 +13,17 @@
   const video = $('video'), list = $('list'), statusEl = $('status');
 
   const VIEW_W = 640;       // Breite der Anzeige
-  const WORK_W = 240;       // Breite der Analyse: klein = schnell, groß = erkennt weiter entfernte Schilder
-  const INTERVAL_MS = 100;  // höchstens 10 Analysen pro Sekunde
+  const WORK_W = 320;       // Mehr Auflösung für kleine und entfernte Schilder
+  const INTERVAL_MS = 70;   // bis zu rund 14 Analysen pro Sekunde
 
   // OCR wird erst geladen, wenn tatsächlich ein Schild erkannt wurde.
-  let ocrWorkerPromise = null;
+  let ocrWorkerPromise = null, ocrQueue = Promise.resolve();
   function getOcrWorker() {
     if (!window.Tesseract) return Promise.reject(new Error('OCR-Bibliothek nicht verfügbar'));
     if (!ocrWorkerPromise) {
-      ocrWorkerPromise = window.Tesseract.createWorker('eng').then(async worker => {
-        await worker.setParameters({
-          tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789ÄÖÜäöüß-.,/',
-          preserve_interword_spaces: '1'
-        });
-        return worker;
+      ocrWorkerPromise = window.Tesseract.createWorker('eng').catch(error => {
+        ocrWorkerPromise = null;
+        throw error;
       });
     }
     return ocrWorkerPromise;
@@ -59,29 +56,41 @@
   /** Text innerhalb eines Schildes lesen; Worker und Erkennung laufen asynchron. */
   function queueOcr(source, detections, analysisW, analysisH) {
     for (const detection of detections) {
-      if (detection.ocrQueued || detection.ocrText) continue;
+      if (detection.ocrQueued || detection.ocrText || detection.label !== 'verbot') continue;
       detection.ocrQueued = true;
       const sx = source.videoWidth || source.naturalWidth || source.width;
       const sy = source.videoHeight || source.naturalHeight || source.height;
-      const pad = Math.max(2, Math.round(Math.min(detection.w, detection.h) * 0.08));
-      const x = Math.max(0, Math.floor((detection.x - pad) * sx / analysisW));
-      const y = Math.max(0, Math.floor((detection.y - pad) * sy / analysisH));
-      const right = Math.min(sx, Math.ceil((detection.x + detection.w + pad) * sx / analysisW));
-      const bottom = Math.min(sy, Math.ceil((detection.y + detection.h + pad) * sy / analysisH));
+      // Nur die weiße Mitte des Tempolimit-Schildes ausschneiden, ohne roten Ring.
+      const insetX = detection.w * 0.22, insetY = detection.h * 0.22;
+      const x = Math.max(0, Math.floor((detection.x + insetX) * sx / analysisW));
+      const y = Math.max(0, Math.floor((detection.y + insetY) * sy / analysisH));
+      const right = Math.min(sx, Math.ceil((detection.x + detection.w - insetX) * sx / analysisW));
+      const bottom = Math.min(sy, Math.ceil((detection.y + detection.h - insetY) * sy / analysisH));
       const crop = document.createElement('canvas');
       crop.width = Math.max(1, (right - x) * 3);
       crop.height = Math.max(1, (bottom - y) * 3);
       const cctx = crop.getContext('2d', { willReadFrequently: true });
       cctx.imageSmoothingEnabled = true;
       cctx.drawImage(source, x, y, right - x, bottom - y, 0, 0, crop.width, crop.height);
+      const pixels = cctx.getImageData(0, 0, crop.width, crop.height);
+      for (let i = 0; i < pixels.data.length; i += 4) {
+        const gray = pixels.data[i] * 0.299 + pixels.data[i + 1] * 0.587 + pixels.data[i + 2] * 0.114;
+        const value = gray < 150 ? 0 : 255;
+        pixels.data[i] = pixels.data[i + 1] = pixels.data[i + 2] = value;
+      }
+      cctx.putImageData(pixels, 0, 0);
 
-      getOcrWorker().then(worker => worker.recognize(crop)).then(({ data }) => {
-        // Restrict output to plausible sign text and avoid rendering OCR as HTML.
-        detection.ocrText = (data.text || '').replace(/[^\p{L}\p{N}\s.,/-]/gu, ' ').replace(/\s+/g, ' ').trim();
+      ocrQueue = ocrQueue.then(async () => {
+        const worker = await getOcrWorker();
+        await worker.setParameters({ tessedit_char_whitelist: '0123456789', tessedit_pageseg_mode: '8' });
+        const { data } = await worker.recognize(crop);
+        const digits = (data.text || '').replace(/\D/g, '');
+        detection.ocrText = digits ? digits + ' km/h' : '';
         renderList();
       }).catch(() => {
         detection.ocrText = '';
         detection.ocrFailed = true;
+        detection.ocrQueued = false;
         renderList();
       });
     }
@@ -138,7 +147,7 @@
     ctx.font = '600 15px Bahnschrift, "DIN Alternate", system-ui, sans-serif';
     for (const t of current) {
       const s = D.SIGNS[t.label], x = t.x * k, y = t.y * k, w = t.w * k, h = t.h * k;
-      const txt = (t.ocrText ? t.ocrText + ' · ' : '') + s.name + ' ' + Math.round(t.conf * 100) + ' %', tw = ctx.measureText(txt).width + 10;
+      const txt = (t.ocrText ? t.ocrText + ' · ' : '') + s.name + ' ' + Math.round(t.conf * 100) + ' %', tw = Math.min(view.width - x, ctx.measureText(txt).width + 10);
       const ty = y > 22 ? y - 22 : y + h + 2;
       ctx.strokeStyle = s.hex; ctx.strokeRect(x, y, w, h);
       ctx.fillStyle = s.hex; ctx.fillRect(x, ty, tw, 20);
@@ -169,7 +178,7 @@
       stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 } }, audio: false });
       video.srcObject = stream; await video.play();
-      still = null; tracker = D.createTracker(); running = true;
+      still = null; tracker = D.createTracker(2, 3); running = true;
       $('camBtn').textContent = 'Kamera stoppen';
       requestAnimationFrame(frame);
     } catch (err) {

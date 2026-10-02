@@ -18,8 +18,8 @@
   const CONFIG = {
     minSaturation: 0.5,  // Farbsättigung ab der ein Pixel zählt (0..1). Höher = strenger.
     minValue: 0.22,      // Helligkeit, darunter wird ein Pixel ignoriert
-    minBox: 10,          // kleinste Kantenlänge einer Fläche
-    minArea: 40,         // kleinste Pixelanzahl einer Fläche
+    minBox: 8,           // kleinere Flächen bei höherer Analyseauflösung zulassen
+    minArea: 28,         // kleinste Pixelanzahl einer Fläche
     maxFrameShare: 0.9,  // Flächen, die fast das ganze Bild füllen, sind kein Schild
     minAspect: 0.5,      // Breite/Höhe, erlaubter Bereich
     maxAspect: 2.2
@@ -30,7 +30,7 @@
     stop:              { name: 'Stopp',             zeichen: 'Z 206',     hex: '#d3232f', text: '#fff',    note: 'Roter Achtkant: Halt! Vorfahrt gewähren.' },
     vorfahrtGewaehren: { name: 'Vorfahrt gewähren', zeichen: 'Z 205',     hex: '#d3232f', text: '#fff',    note: 'Rotes Dreieck mit der Spitze nach unten.' },
     warnung:           { name: 'Gefahrzeichen',     zeichen: 'Z 101 ff.', hex: '#d3232f', text: '#fff',    note: 'Rotes Dreieck, Spitze oben. Das Symbol im Inneren wird nicht gelesen.' },
-    verbot:            { name: 'Verbotszeichen',    zeichen: 'Z 2xx',     hex: '#d3232f', text: '#fff',    note: 'Roter Ring, z. B. Tempolimit (Z 274). Die Zahl wird nicht gelesen.' },
+    verbot:            { name: 'Tempolimit / Verbot', zeichen: 'Z 274 ff.', hex: '#d3232f', text: '#fff',    note: 'Die Ziffer im roten Ring wird automatisch gelesen.' },
     einfahrtVerboten:  { name: 'Einfahrt verboten', zeichen: 'Z 267',     hex: '#d3232f', text: '#fff',    note: 'Roter Vollkreis mit weißem Balken.' },
     gebot:             { name: 'Gebotszeichen',     zeichen: 'Z 2xx',     hex: '#1467b8', text: '#fff',    note: 'Blauer Kreis, z. B. vorgeschriebene Fahrtrichtung oder Radweg.' },
     hinweis:           { name: 'Hinweiszeichen',    zeichen: 'Z 3xx',     hex: '#1467b8', text: '#fff',    note: 'Blaues Rechteck, z. B. Parkplatz (Z 314).' },
