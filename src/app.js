@@ -60,29 +60,32 @@
       detection.ocrQueued = true;
       const sx = source.videoWidth || source.naturalWidth || source.width;
       const sy = source.videoHeight || source.naturalHeight || source.height;
-      // Nur die weiße Mitte des Tempolimit-Schildes ausschneiden, ohne roten Ring.
-      const insetX = detection.w * 0.22, insetY = detection.h * 0.22;
+      // Großzügig ausschneiden: auch dreistellige Limits reichen fast über
+      // die gesamte weiße Innenfläche. Den roten Ring entfernen wir unten per Farbe.
+      const insetX = detection.w * 0.08, insetY = detection.h * 0.08;
       const x = Math.max(0, Math.floor((detection.x + insetX) * sx / analysisW));
       const y = Math.max(0, Math.floor((detection.y + insetY) * sy / analysisH));
       const right = Math.min(sx, Math.ceil((detection.x + detection.w - insetX) * sx / analysisW));
       const bottom = Math.min(sy, Math.ceil((detection.y + detection.h - insetY) * sy / analysisH));
       const crop = document.createElement('canvas');
-      crop.width = Math.max(1, (right - x) * 3);
-      crop.height = Math.max(1, (bottom - y) * 3);
+      crop.width = Math.max(1, (right - x) * 5);
+      crop.height = Math.max(1, (bottom - y) * 5);
       const cctx = crop.getContext('2d', { willReadFrequently: true });
       cctx.imageSmoothingEnabled = true;
       cctx.drawImage(source, x, y, right - x, bottom - y, 0, 0, crop.width, crop.height);
       const pixels = cctx.getImageData(0, 0, crop.width, crop.height);
       for (let i = 0; i < pixels.data.length; i += 4) {
-        const gray = pixels.data[i] * 0.299 + pixels.data[i + 1] * 0.587 + pixels.data[i + 2] * 0.114;
-        const value = gray < 150 ? 0 : 255;
+        const red = pixels.data[i], green = pixels.data[i + 1], blue = pixels.data[i + 2];
+        const isRed = red > green * 1.3 && red > blue * 1.3;
+        const gray = red * 0.299 + green * 0.587 + blue * 0.114;
+        const value = !isRed && gray < 170 ? 0 : 255;
         pixels.data[i] = pixels.data[i + 1] = pixels.data[i + 2] = value;
       }
       cctx.putImageData(pixels, 0, 0);
 
       ocrQueue = ocrQueue.then(async () => {
         const worker = await getOcrWorker();
-        await worker.setParameters({ tessedit_char_whitelist: '0123456789', tessedit_pageseg_mode: '8' });
+        await worker.setParameters({ tessedit_char_whitelist: '0123456789', tessedit_pageseg_mode: '7' });
         const { data } = await worker.recognize(crop);
         const digits = (data.text || '').replace(/\D/g, '');
         detection.ocrText = digits ? digits + ' km/h' : '';
