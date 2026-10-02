@@ -31,6 +31,15 @@
     }
     return digitSessionPromise;
   }
+  let textWorkerPromise = null, textQueue = Promise.resolve();
+  function getTextWorker() {
+    if (!window.Tesseract) return Promise.reject(new Error('Texterkennung nicht verfügbar'));
+    if (!textWorkerPromise) textWorkerPromise = window.Tesseract.createWorker('deu').catch(error => {
+      textWorkerPromise = null;
+      throw error;
+    });
+    return textWorkerPromise;
+  }
 
   let stream = null, running = false, still = null, lastRun = 0, lastKey = '', dims = '';
   let tracker = D.createTracker(), current = [], mask = null;
@@ -56,10 +65,21 @@
     renderList();
   }
 
+  function refreshStill() {
+    if (!still || running) return;
+    ctx.drawImage(still, 0, 0, view.width, view.height);
+    draw();
+  }
+
   /** Ziffern in der weißen Innenfläche eines runden Tempolimits mit einem CNN lesen. */
   function queueOcr(source, detections, analysisW, analysisH) {
     for (const detection of detections) {
-      if (detection.ocrQueued || detection.ocrText || detection.label !== 'verbot') continue;
+      if (detection.ocrQueued || detection.ocrText || detection.ocrFailed) continue;
+      if (detection.label === 'hinweis' || detection.label === 'ortstafel') {
+        queueSignText(source, detection, analysisW, analysisH);
+        continue;
+      }
+      if (detection.label !== 'verbot') continue;
       detection.ocrQueued = true;
       const sx = source.videoWidth || source.naturalWidth || source.width;
       const sy = source.videoHeight || source.naturalHeight || source.height;
@@ -93,12 +113,42 @@
         for (const char of chars) digits += await classifyDigit(session, char);
         detection.ocrText = digits ? digits + ' km/h' : '';
         renderList();
+        refreshStill();
       }).catch(() => {
         detection.ocrText = '';
-        detection.ocrQueued = false;
+        detection.ocrFailed = true;
         renderList();
+        refreshStill();
       });
     }
+  }
+
+  /** Ganze Schrift auf rechteckigen Hinweisschildern und Ortstafeln per OCR lesen. */
+  function queueSignText(source, detection, analysisW, analysisH) {
+    detection.ocrQueued = true;
+    const sx = source.videoWidth || source.naturalWidth || source.width;
+    const sy = source.videoHeight || source.naturalHeight || source.height;
+    const padX = detection.w * 0.025, padY = detection.h * 0.06;
+    const x = Math.max(0, Math.floor((detection.x + padX) * sx / analysisW));
+    const y = Math.max(0, Math.floor((detection.y + padY) * sy / analysisH));
+    const right = Math.min(sx, Math.ceil((detection.x + detection.w - padX) * sx / analysisW));
+    const bottom = Math.min(sy, Math.ceil((detection.y + detection.h - padY) * sy / analysisH));
+    const crop = document.createElement('canvas');
+    crop.width = Math.max(1, (right - x) * 2);
+    crop.height = Math.max(1, (bottom - y) * 2);
+    crop.getContext('2d').drawImage(source, x, y, right - x, bottom - y, 0, 0, crop.width, crop.height);
+    textQueue = textQueue.then(async () => {
+      const worker = await getTextWorker();
+      await worker.setParameters({ preserve_interword_spaces: '1' });
+      const { data } = await worker.recognize(crop);
+      detection.ocrText = (data.text || '').replace(/[^\p{L}\p{N}\s.,'’/-]/gu, ' ').replace(/\s+/g, ' ').trim();
+      renderList();
+      refreshStill();
+    }).catch(() => {
+      detection.ocrFailed = true;
+      renderList();
+      refreshStill();
+    });
   }
 
   /** Verbundene dunkle Ziffernformen im kontrastverstärkten Ausschnitt segmentieren. */
@@ -121,7 +171,10 @@
         }
       }
       const w = x1 - x0 + 1, h = y1 - y0 + 1;
-      if (h >= height * 0.16 && w >= width * 0.025 && tail >= width * height * 0.001) parts.push({ x: x0, y: y0, w, h, area: tail });
+      const centered = x0 > width * 0.04 && x1 < width * 0.96 && y0 > height * 0.08 && y1 < height * 0.94;
+      if (centered && h >= height * 0.18 && w >= width * 0.025 && tail >= width * height * 0.0015) {
+        parts.push({ x: x0, y: y0, w, h, area: tail });
+      }
     }
     // Small flecks are filtered above; favor the three sign glyphs if texture remains.
     const tallest = Math.max(0, ...parts.map(part => part.h));
@@ -134,11 +187,23 @@
     const scale = Math.min(20 / part.w, 20 / part.h);
     const drawW = Math.max(1, Math.round(part.w * scale)), drawH = Math.max(1, Math.round(part.h * scale));
     const left = Math.round((28 - drawW) / 2), top = Math.round((28 - drawH) / 2);
-    const input = new Float32Array(28 * 28);
+    const glyph = new Float32Array(28 * 28);
     for (let y = 0; y < drawH; y++) for (let x = 0; x < drawW; x++) {
-      const sx = part.x + Math.min(part.w - 1, Math.floor(x * part.w / drawW));
-      const sy = part.y + Math.min(part.h - 1, Math.floor(y * part.h / drawH));
-      if (image.data[(sy * width + sx) * 4] < 128) input[(top + y) * 28 + left + x] = 1;
+      const sx = part.x + Math.min(part.w - 1, Math.floor((x + 0.5) * part.w / drawW));
+      const sy = part.y + Math.min(part.h - 1, Math.floor((y + 0.5) * part.h / drawH));
+      if (image.data[(sy * width + sx) * 4] < 128) glyph[(top + y) * 28 + left + x] = 1;
+    }
+    // MNIST-Zeichen anhand des Tinten-Schwerpunkts, nicht nur am Rahmen zentrieren.
+    let mass = 0, sumX = 0, sumY = 0;
+    for (let y = 0; y < 28; y++) for (let x = 0; x < 28; x++) {
+      const ink = glyph[y * 28 + x]; mass += ink; sumX += x * ink; sumY += y * ink;
+    }
+    const shiftX = mass ? Math.round(13.5 - sumX / mass) : 0;
+    const shiftY = mass ? Math.round(13.5 - sumY / mass) : 0;
+    const input = new Float32Array(28 * 28);
+    for (let y = 0; y < 28; y++) for (let x = 0; x < 28; x++) {
+      const dx = x + shiftX, dy = y + shiftY;
+      if (dx >= 0 && dx < 28 && dy >= 0 && dy < 28) input[dy * 28 + dx] = glyph[y * 28 + x];
     }
     const tensor = new window.ort.Tensor('float32', input, [1, 1, 28, 28]);
     const result = await session.run({ [session.inputNames[0]]: tensor });
@@ -151,7 +216,8 @@
   /** Liste unter dem Bild – nur neu aufbauen, wenn sich die Schildtypen ändern. */
   function renderList() {
     const labels = [...new Set(current.map(t => t.label))];
-    const key = labels.map(l => l + ':' + current.filter(t => t.label === l).map(t => t.ocrText || '').join('|')).join();
+    const key = labels.map(l => l + ':' + current.filter(t => t.label === l)
+      .map(t => (t.ocrText || '') + '/' + (t.state || '') + '/' + (t.ocrFailed ? 'failed' : '')).join('|')).join();
     if (key === lastKey) return;
     lastKey = key;
     list.replaceChildren();
@@ -176,6 +242,16 @@
         read.className = 'ocr-text';
         read.textContent = 'Gelesener Text: ' + texts.join(' · ');
         li.append(read);
+      } else if (current.some(t => t.label === label && t.ocrFailed)) {
+        const failed = document.createElement('p');
+        failed.textContent = 'Erkennung konnte nicht geladen werden.';
+        li.append(failed);
+      }
+      const lightStates = [...new Set(current.filter(t => t.label === label).map(t => t.state).filter(Boolean))];
+      if (lightStates.length) {
+        const state = document.createElement('p');
+        state.textContent = 'Hellstes Lichtfeld: ' + lightStates.join(', ');
+        li.append(state);
       }
       list.append(li);
     }
@@ -184,7 +260,7 @@
   /** Debug: erkannte Farbflächen halbtransparent einblenden. */
   function drawMask() {
     const m = maskCv.getContext('2d'), img = m.createImageData(maskCv.width, maskCv.height);
-    const pal = [null, [211, 35, 47], [20, 103, 184], [242, 194, 0]];
+    const pal = [null, [211, 35, 47], [20, 103, 184], [242, 194, 0], [35, 185, 86]];
     for (let i = 0; i < mask.length; i++) if (mask[i]) img.data.set([...pal[mask[i]], 255], i * 4);
     m.putImageData(img, 0, 0);
     ctx.imageSmoothingEnabled = false; ctx.globalAlpha = 0.6;
@@ -199,7 +275,7 @@
     ctx.font = '600 15px Bahnschrift, "DIN Alternate", system-ui, sans-serif';
     for (const t of current) {
       const s = D.SIGNS[t.label], x = t.x * k, y = t.y * k, w = t.w * k, h = t.h * k;
-      const txt = (t.ocrText ? t.ocrText + ' · ' : '') + s.name + ' ' + Math.round(t.conf * 100) + ' %', tw = Math.min(view.width - x, ctx.measureText(txt).width + 10);
+      const txt = (t.ocrText ? t.ocrText + ' · ' : '') + (t.state ? t.state + ' · ' : '') + s.name + ' ' + Math.round(t.conf * 100) + ' %', tw = Math.min(view.width - x, ctx.measureText(txt).width + 10);
       const ty = y > 22 ? y - 22 : y + h + 2;
       ctx.strokeStyle = s.hex; ctx.strokeRect(x, y, w, h);
       ctx.fillStyle = s.hex; ctx.fillRect(x, ty, tw, 20);
@@ -258,6 +334,7 @@
     stopCamera();
     const img = new Image();
     img.onload = () => { still = img; lastKey = ''; showStill(); URL.revokeObjectURL(img.src); };
+    img.onerror = () => { statusEl.textContent = 'Das Bild konnte nicht geöffnet werden.'; URL.revokeObjectURL(img.src); };
     img.src = URL.createObjectURL(f);
   });
   ['sat', 'maskCb'].forEach(id => $(id).addEventListener('input', () => {

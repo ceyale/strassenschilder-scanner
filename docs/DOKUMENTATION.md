@@ -31,8 +31,9 @@ Die Farb- und Formerkennung liegt in `src/detector.js`; die OCR-Anbindung liegt 
    - Rot: *h* ≤ 14° oder ≥ 345° (Rot liegt am Anfang/Ende des Farbkreises)
    - Gelb: *h* 38°–66°, *v* > 0,45
    - Blau: *h* 200°–255°
-   - Voraussetzung immer: *s* ≥ `minSaturation` (Regler „Farbstrenge“) und *v* ≥ 0,22. Graue, weiße und schwarze Pixel fallen so heraus.
-3. **Zusammenhängende Flächen (`findComponents`).** Flood-Fill mit 4er-Nachbarschaft sammelt gleichfarbige Pixel zu Flächen. Jede Fläche bekommt einen Rahmen (Bounding Box). Verworfen werden Flächen, die zu klein sind (Kantenlänge < 10 px, Fläche < 40 px), ein unpassendes Seitenverhältnis haben (außerhalb 0,5–2,2) oder fast das ganze Bild füllen (> 90 %).
+   - Grün: *h* 75°–165° (für Ampellinsen)
+   - Voraussetzung immer: *s* ≥ `minSaturation` (Regler „Farbstrenge“, Startwert 0,45) und *v* ≥ 0,22. Graue, weiße und schwarze Pixel fallen so heraus.
+3. **Zusammenhängende Flächen (`findComponents`).** Flood-Fill mit 4er-Nachbarschaft sammelt gleichfarbige Pixel zu Flächen. Jede Fläche bekommt einen Rahmen (Bounding Box). Verworfen werden Flächen, die zu klein sind (Kantenlänge < 8 px, Fläche < 28 px), ein unpassendes Seitenverhältnis haben (außerhalb 0,3–3,5) oder fast das ganze Bild füllen (> 90 %).
 4. **Umriss vermessen (`analyzeShape`).** Pro Bildzeile zählt nur der äußerste linke und rechte Pixel der Fläche. Dadurch wird ein roter *Ring* zur gefüllten *Silhouette*. Daraus entstehen vier Kennzahlen:
 
    | Kennzahl | Bedeutung |
@@ -51,6 +52,8 @@ Die Farb- und Formerkennung liegt in `src/detector.js`; die OCR-Anbindung liegt 
 7. **Sicherheit (`confidence`).** `1 − 3 · |solidity − Idealwert|`, begrenzt auf 0…1. Das ist ein Maß für die Formtreue, **keine** statistische Wahrscheinlichkeit.
 8. **Stabilisierung (`createTracker`).** Treffer im Video flackern. Der Tracker ordnet Treffer im nächsten Bild per Überlappung (IoU > 0,25, gleicher Typ) dem vorherigen zu, glättet den Rahmen und zeigt ein Schild erst nach 3 Treffern. Nach 3 Bildern ohne Treffer verschwindet es. Bei Einzelfotos ist der Tracker aus.
 9. **Tempolimit-Zahl lesen.** Für rote runde Verbotszeichen wird die weiße Innenfläche aus der Bounding Box ausgeschnitten und kontrastverstärkt. Dunkle, zusammenhängende Ziffernformen werden segmentiert und jeweils auf 28×28 Pixel normalisiert. Ein sehr kleines CNN (ONNX Model Zoo MNIST, 26 KB) klassifiziert jede Ziffer; ONNX Runtime Web führt das Modell mit WASM im Browser aus. Die Ziffern werden von links nach rechts zusammengesetzt und als „… km/h“ angezeigt. Das Bild wird nicht hochgeladen. ONNX Runtime Web und die WASM-Datei kommen beim ersten Start von jsDelivr. Das Modell wurde auf handgeschriebenen Ziffern trainiert, nicht speziell auf Verkehrsschildern; Perspektive und Segmentierungsfehler können die Ausgabe beeinträchtigen.
+10. **Schrift lesen.** Blaue rechteckige Hinweisschilder und gelbe Ortstafeln werden ausgeschnitten und mit Tesseract.js samt deutschem Sprachmodell gelesen. Es läuft lokal im Browser, Sprachmodell und Laufzeit werden beim ersten Einsatz über jsDelivr geladen.
+11. **Ampeln finden.** Farbflächen der roten, gelben und grünen Linsen werden als Kreise gesucht. Liegen alle drei Farben in passender Größe senkrecht untereinander, wird eine Ampel-Bounding-Box gezeichnet. Die Liste zeigt, welches Feld im Kamerabild am hellsten ist. Das ist eine Farbheuristik und kein robustes Verkehrsampel- oder Fahrzustandsmodell.
 
 ## 4. Einstellbare Werte
 
@@ -79,6 +82,7 @@ Für eine neue Form (z. B. Sechseck) `shapeOf` erweitern und passende Kennzahlen
 ## 7. Grenzen (bitte ernst nehmen)
 
 - **Ziffern-CNN ist Näherung.** Das MNIST-CNN wurde nicht auf Verkehrszeichen trainiert. Unschärfe, kleine Schilder, zusammengeklebte Ziffern und Schräglage können zu falschen Ziffern führen.
+- **Ampelerkennung ist eingeschränkt.** Die Heuristik verlangt sichtbare rote, gelbe und grüne Linsen im Bild. Sie findet keine verdeckten oder dunklen Lampen und ist nicht für Fahrentscheidungen gedacht.
 - **Fehltreffer** durch rote/blaue/gelbe Gegenstände mit passender Form (Autos, Warnwesten, Plakate, blauer Himmel bei hoher Farbstärke). Dagegen helfen Regler und Masken-Ansicht.
 - **Verpasste Schilder** bei Gegenlicht, Dämmerung, starker Schräglage, Verdeckung, schmutzigen oder stark verblichenen Schildern.
 - **Nur frontale Sicht** ist ausgelegt. Schräg gesehene Kreise werden Ellipsen, Rechtecke Trapeze.

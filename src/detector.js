@@ -12,17 +12,17 @@
 (function (root) {
   'use strict';
 
-  const NONE = 0, RED = 1, BLUE = 2, YELLOW = 3;
+  const NONE = 0, RED = 1, BLUE = 2, YELLOW = 3, GREEN = 4;
 
   /** Schwellwerte. Alle Größen in Pixeln des verkleinerten Analysebilds. */
   const CONFIG = {
-    minSaturation: 0.5,  // Farbsättigung ab der ein Pixel zählt (0..1). Höher = strenger.
+    minSaturation: 0.45, // etwas toleranter bei blassen/komprimierten Kamerabildern
     minValue: 0.22,      // Helligkeit, darunter wird ein Pixel ignoriert
     minBox: 8,           // kleinere Flächen bei höherer Analyseauflösung zulassen
     minArea: 28,         // kleinste Pixelanzahl einer Fläche
     maxFrameShare: 0.9,  // Flächen, die fast das ganze Bild füllen, sind kein Schild
-    minAspect: 0.5,      // Breite/Höhe, erlaubter Bereich
-    maxAspect: 2.2
+    minAspect: 0.3,      // längliche Hinweis- und Ortstafeln einschließen
+    maxAspect: 3.5
   };
 
   /** Katalog der erkennbaren Schilder (Zeichen-Nummern nach StVO). */
@@ -35,7 +35,8 @@
     gebot:             { name: 'Gebotszeichen',     zeichen: 'Z 2xx',     hex: '#1467b8', text: '#fff',    note: 'Blauer Kreis, z. B. vorgeschriebene Fahrtrichtung oder Radweg.' },
     hinweis:           { name: 'Hinweiszeichen',    zeichen: 'Z 3xx',     hex: '#1467b8', text: '#fff',    note: 'Blaues Rechteck, z. B. Parkplatz (Z 314).' },
     vorfahrtstrasse:   { name: 'Vorfahrtstraße',    zeichen: 'Z 306',     hex: '#f2c200', text: '#1e2329', note: 'Gelbe Raute mit weißem Rand.' },
-    ortstafel:         { name: 'Ortstafel',         zeichen: 'Z 310',     hex: '#f2c200', text: '#1e2329', note: 'Gelbes Rechteck am Ortseingang.' }
+    ortstafel:         { name: 'Ortstafel',         zeichen: 'Z 310',     hex: '#f2c200', text: '#1e2329', note: 'Gelbes Rechteck am Ortseingang.' },
+    ampel:             { name: 'Ampel',             zeichen: 'Lichtsignal', hex: '#303941', text: '#fff', note: 'Vertikale Rot-Gelb-Grün-Lichtfelder erkannt.' }
   };
 
   /** Schritt 1: RGB → Farbklasse. h in Grad (0..360), s und v in 0..1. */
@@ -52,6 +53,7 @@
     if (h <= 14 || h >= 345) return RED;          // Rot liegt am Rand des Farbkreises
     if (h >= 38 && h <= 66 && v > 0.45) return YELLOW;
     if (h >= 200 && h <= 255) return BLUE;
+    if (h >= 75 && h <= 165) return GREEN;
     return NONE;
   }
 
@@ -154,6 +156,45 @@
   const confidence = (shape, solidity) => Math.max(0, Math.min(1, 1 - Math.abs(solidity - IDEAL[shape]) * 3));
 
   /** Ein Bild analysieren. `data` ist RGBA (ImageData.data). */
+  function detectTrafficLights(comps, queue, data, w) {
+    const lamps = comps.filter(c => {
+      if (![RED, YELLOW, GREEN].includes(c.color)) return false;
+      const aspect = c.w / c.h;
+      if (aspect < 0.62 || aspect > 1.4) return false;
+      const stats = analyzeShape(c, queue, w);
+      return stats.solidity > 0.55 && stats.solidity < 0.98;
+    });
+    const red = lamps.filter(c => c.color === RED), yellow = lamps.filter(c => c.color === YELLOW), green = lamps.filter(c => c.color === GREEN);
+    const out = [];
+    for (const r of red) for (const y of yellow) for (const g of green) {
+      const ordered = [r, y, g];
+      const centers = ordered.map(c => c.x + c.w / 2);
+      const sizes = ordered.map(c => (c.w + c.h) / 2);
+      const centerX = centers.reduce((a, b) => a + b, 0) / 3;
+      const typical = sizes.reduce((a, b) => a + b, 0) / 3;
+      if (Math.max(...centers) - Math.min(...centers) > typical * 0.65) continue;
+      if (Math.max(...sizes) / Math.max(1, Math.min(...sizes)) > 1.8) continue;
+      if (y.y <= r.y || g.y <= y.y) continue;
+      const gap1 = y.y - (r.y + r.h), gap2 = g.y - (y.y + y.h);
+      if (gap1 > typical * 2.5 || gap2 > typical * 2.5 || gap1 < -typical * 0.4 || gap2 < -typical * 0.4) continue;
+      const brightness = ordered.map(c => {
+        let sum = 0;
+        for (let k = c.start; k < c.end; k++) {
+          const p = queue[k] * 4;
+          sum += Math.max(data[p], data[p + 1], data[p + 2]);
+        }
+        return sum / Math.max(1, c.area);
+      });
+      const brightest = brightness.indexOf(Math.max(...brightness));
+      const names = ['Rot', 'Gelb', 'Grün'];
+      out.push({ label: 'ampel', state: names[brightest], x: Math.min(...ordered.map(c => c.x)), y: r.y,
+        w: Math.max(...ordered.map(c => c.x + c.w)) - Math.min(...ordered.map(c => c.x)),
+        h: g.y + g.h - r.y, conf: 0.82 });
+      break;
+    }
+    return out;
+  }
+
   function detect(data, w, h, options) {
     const cfg = Object.assign({}, CONFIG, options);
     const mask = buildMask(data, w, h, cfg);
@@ -165,6 +206,7 @@
       const label = shape && labelOf(c.color, shape, s.fill);
       if (label) detections.push({ label, shape, x: c.x, y: c.y, w: c.w, h: c.h, conf: confidence(shape, s.solidity) });
     }
+    detections.push(...detectTrafficLights(comps, queue, data, w));
     return { detections, mask };
   }
 
@@ -192,6 +234,7 @@
             best.matched = true; best.hits++; best.miss = 0;
             for (const k of ['x', 'y', 'w', 'h']) best[k] = best[k] * 0.5 + d[k] * 0.5;   // Box glätten
             best.conf = best.conf * 0.7 + d.conf * 0.3;
+            if (d.state) best.state = d.state;
           } else tracks.push(Object.assign({ id: nextId++, hits: 1, miss: 0, matched: true }, d));
         }
         tracks.forEach(t => { if (!t.matched) t.miss++; });
