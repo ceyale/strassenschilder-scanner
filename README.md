@@ -2,7 +2,7 @@
 
 Erkennt einfache deutsche Verkehrszeichen live mit der Handykamera – direkt im Browser, ohne Server, ohne Installation, ohne Bibliotheken.
 
-Erkannt werden Schilder an **Farbe + Form**: Stopp, Vorfahrt gewähren, Gefahrzeichen, Tempolimit/Verbotszeichen, Einfahrt verboten, Gebotszeichen, Hinweiszeichen, Vorfahrtstraße, Ortstafel. Auf Tempolimit-Schildern liest die OCR gezielt die Ziffern aus der weißen Mitte und zeigt z. B. „30 km/h“. Dafür lädt die Seite Tesseract.js von jsDelivr; beim ersten Start ist Internet nötig. Das Bild wird nicht hochgeladen.
+Erkannt werden Schilder an **Farbe + Form**: Stopp, Vorfahrt gewähren, Gefahrzeichen, Tempolimit/Verbotszeichen, Einfahrt verboten, Gebotszeichen, Hinweiszeichen, Vorfahrtstraße, Ortstafel. Bei Tempolimit-Schildern segmentiert ein kleines MNIST-CNN die einzelnen Ziffern in der Bounding Box und liest sie mit ONNX Runtime Web direkt im Browser. Das Bild wird nicht hochgeladen. Beim ersten Start ist Internet nötig, um ONNX Runtime Web und seine WASM-Datei von jsDelivr zu laden.
 
 ## Schnellstart
 

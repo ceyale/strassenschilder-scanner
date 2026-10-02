@@ -50,7 +50,7 @@ Die Farb- und Formerkennung liegt in `src/detector.js`; die OCR-Anbindung liegt 
 6. **Schildtyp (`labelOf`).** Tabelle aus Abschnitt 2.
 7. **Sicherheit (`confidence`).** `1 − 3 · |solidity − Idealwert|`, begrenzt auf 0…1. Das ist ein Maß für die Formtreue, **keine** statistische Wahrscheinlichkeit.
 8. **Stabilisierung (`createTracker`).** Treffer im Video flackern. Der Tracker ordnet Treffer im nächsten Bild per Überlappung (IoU > 0,25, gleicher Typ) dem vorherigen zu, glättet den Rahmen und zeigt ein Schild erst nach 3 Treffern. Nach 3 Bildern ohne Treffer verschwindet es. Bei Einzelfotos ist der Tracker aus.
-9. **Tempolimit-Zahl lesen.** Für rote runde Verbotszeichen wird die Innenfläche großzügig ausgeschnitten, fünffach vergrößert und kontrastverstärkt; der rote Rand wird dabei weiß maskiert. Tesseract.js liest die Ziffern als einzelne Textzeile, damit auch dreistellige Werte wie „100“ Platz haben. Die Anzeige ergänzt „km/h“. Das läuft lokal im Browser. Tesseract.js und das englische Zahlenmodell werden beim ersten OCR-Einsatz über jsDelivr geladen; ohne Internet beim ersten Einsatz ist die OCR nicht verfügbar.
+9. **Tempolimit-Zahl lesen.** Für rote runde Verbotszeichen wird die weiße Innenfläche aus der Bounding Box ausgeschnitten und kontrastverstärkt. Dunkle, zusammenhängende Ziffernformen werden segmentiert und jeweils auf 28×28 Pixel normalisiert. Ein sehr kleines CNN (ONNX Model Zoo MNIST, 26 KB) klassifiziert jede Ziffer; ONNX Runtime Web führt das Modell mit WASM im Browser aus. Die Ziffern werden von links nach rechts zusammengesetzt und als „… km/h“ angezeigt. Das Bild wird nicht hochgeladen. ONNX Runtime Web und die WASM-Datei kommen beim ersten Start von jsDelivr. Das Modell wurde auf handgeschriebenen Ziffern trainiert, nicht speziell auf Verkehrsschildern; Perspektive und Segmentierungsfehler können die Ausgabe beeinträchtigen.
 
 ## 4. Einstellbare Werte
 
@@ -78,7 +78,7 @@ Für eine neue Form (z. B. Sechseck) `shapeOf` erweitern und passende Kennzahlen
 
 ## 7. Grenzen (bitte ernst nehmen)
 
-- **OCR ist Näherung.** Ein Tempo-30-Schild wird als Verbotszeichen erkannt; OCR versucht zusätzlich, „30 km/h“ zu lesen. Unschärfe, kleine Schilder und Schräglage können zu falschen Ziffern führen.
+- **Ziffern-CNN ist Näherung.** Das MNIST-CNN wurde nicht auf Verkehrszeichen trainiert. Unschärfe, kleine Schilder, zusammengeklebte Ziffern und Schräglage können zu falschen Ziffern führen.
 - **Fehltreffer** durch rote/blaue/gelbe Gegenstände mit passender Form (Autos, Warnwesten, Plakate, blauer Himmel bei hoher Farbstärke). Dagegen helfen Regler und Masken-Ansicht.
 - **Verpasste Schilder** bei Gegenlicht, Dämmerung, starker Schräglage, Verdeckung, schmutzigen oder stark verblichenen Schildern.
 - **Nur frontale Sicht** ist ausgelegt. Schräg gesehene Kreise werden Ellipsen, Rechtecke Trapeze.

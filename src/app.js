@@ -16,17 +16,20 @@
   const WORK_W = 320;       // Mehr Auflösung für kleine und entfernte Schilder
   const INTERVAL_MS = 70;   // bis zu rund 14 Analysen pro Sekunde
 
-  // OCR wird erst geladen, wenn tatsächlich ein Schild erkannt wurde.
-  let ocrWorkerPromise = null, ocrQueue = Promise.resolve();
-  function getOcrWorker() {
-    if (!window.Tesseract) return Promise.reject(new Error('OCR-Bibliothek nicht verfügbar'));
-    if (!ocrWorkerPromise) {
-      ocrWorkerPromise = window.Tesseract.createWorker('eng').catch(error => {
-        ocrWorkerPromise = null;
+  // Kleines MNIST-CNN; die 25 KB Gewichte werden erst bei einem Tempolimit geladen.
+  let digitSessionPromise = null, digitQueue = Promise.resolve();
+  function getDigitSession() {
+    if (!window.ort) return Promise.reject(new Error('ONNX Runtime Web nicht verfügbar'));
+    if (!digitSessionPromise) {
+      window.ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/';
+      digitSessionPromise = window.ort.InferenceSession.create('models/mnist-12.onnx', {
+        executionProviders: ['wasm'], graphOptimizationLevel: 'all'
+      }).catch(error => {
+        digitSessionPromise = null;
         throw error;
       });
     }
-    return ocrWorkerPromise;
+    return digitSessionPromise;
   }
 
   let stream = null, running = false, still = null, lastRun = 0, lastKey = '', dims = '';
@@ -53,7 +56,7 @@
     renderList();
   }
 
-  /** Text innerhalb eines Schildes lesen; Worker und Erkennung laufen asynchron. */
+  /** Ziffern in der weißen Innenfläche eines runden Tempolimits mit einem CNN lesen. */
   function queueOcr(source, detections, analysisW, analysisH) {
     for (const detection of detections) {
       if (detection.ocrQueued || detection.ocrText || detection.label !== 'verbot') continue;
@@ -68,8 +71,8 @@
       const right = Math.min(sx, Math.ceil((detection.x + detection.w - insetX) * sx / analysisW));
       const bottom = Math.min(sy, Math.ceil((detection.y + detection.h - insetY) * sy / analysisH));
       const crop = document.createElement('canvas');
-      crop.width = Math.max(1, (right - x) * 5);
-      crop.height = Math.max(1, (bottom - y) * 5);
+      crop.width = Math.max(1, (right - x) * 2);
+      crop.height = Math.max(1, (bottom - y) * 2);
       const cctx = crop.getContext('2d', { willReadFrequently: true });
       cctx.imageSmoothingEnabled = true;
       cctx.drawImage(source, x, y, right - x, bottom - y, 0, 0, crop.width, crop.height);
@@ -83,20 +86,66 @@
       }
       cctx.putImageData(pixels, 0, 0);
 
-      ocrQueue = ocrQueue.then(async () => {
-        const worker = await getOcrWorker();
-        await worker.setParameters({ tessedit_char_whitelist: '0123456789', tessedit_pageseg_mode: '7' });
-        const { data } = await worker.recognize(crop);
-        const digits = (data.text || '').replace(/\D/g, '');
+      digitQueue = digitQueue.then(async () => {
+        const session = await getDigitSession();
+        const chars = segmentDigits(pixels, crop.width, crop.height);
+        let digits = '';
+        for (const char of chars) digits += await classifyDigit(session, char);
         detection.ocrText = digits ? digits + ' km/h' : '';
         renderList();
       }).catch(() => {
         detection.ocrText = '';
-        detection.ocrFailed = true;
         detection.ocrQueued = false;
         renderList();
       });
     }
+  }
+
+  /** Verbundene dunkle Ziffernformen im kontrastverstärkten Ausschnitt segmentieren. */
+  function segmentDigits(image, width, height) {
+    const binary = new Uint8Array(width * height), seen = new Uint8Array(width * height);
+    for (let p = 0, i = 0; i < binary.length; i++, p += 4) binary[i] = image.data[p] < 128 ? 1 : 0;
+    const queue = new Int32Array(binary.length), parts = [];
+    for (let start = 0; start < binary.length; start++) {
+      if (!binary[start] || seen[start]) continue;
+      let head = 0, tail = 0, x0 = width, x1 = 0, y0 = height, y1 = 0;
+      queue[tail++] = start; seen[start] = 1;
+      while (head < tail) {
+        const p = queue[head++], x = p % width, y = (p / width) | 0;
+        x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y);
+        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+          const nx = x + dx, ny = y + dy;
+          if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+          const next = ny * width + nx;
+          if (binary[next] && !seen[next]) { seen[next] = 1; queue[tail++] = next; }
+        }
+      }
+      const w = x1 - x0 + 1, h = y1 - y0 + 1;
+      if (h >= height * 0.16 && w >= width * 0.025 && tail >= width * height * 0.001) parts.push({ x: x0, y: y0, w, h, area: tail });
+    }
+    // Small flecks are filtered above; favor the three sign glyphs if texture remains.
+    const tallest = Math.max(0, ...parts.map(part => part.h));
+    return parts.filter(part => part.h >= tallest * 0.55).sort((a, b) => a.x - b.x).slice(0, 3).map(part => ({ image, width, part }));
+  }
+
+  /** Ein segmentiertes Zeichen MNIST-konform auf 28×28 bringen und per ONNX-CNN klassifizieren. */
+  async function classifyDigit(session, char) {
+    const { image, width, part } = char;
+    const scale = Math.min(20 / part.w, 20 / part.h);
+    const drawW = Math.max(1, Math.round(part.w * scale)), drawH = Math.max(1, Math.round(part.h * scale));
+    const left = Math.round((28 - drawW) / 2), top = Math.round((28 - drawH) / 2);
+    const input = new Float32Array(28 * 28);
+    for (let y = 0; y < drawH; y++) for (let x = 0; x < drawW; x++) {
+      const sx = part.x + Math.min(part.w - 1, Math.floor(x * part.w / drawW));
+      const sy = part.y + Math.min(part.h - 1, Math.floor(y * part.h / drawH));
+      if (image.data[(sy * width + sx) * 4] < 128) input[(top + y) * 28 + left + x] = 1;
+    }
+    const tensor = new window.ort.Tensor('float32', input, [1, 1, 28, 28]);
+    const result = await session.run({ [session.inputNames[0]]: tensor });
+    const scores = result[session.outputNames[0]].data;
+    let best = 0;
+    for (let i = 1; i < 10; i++) if (scores[i] > scores[best]) best = i;
+    return String(best);
   }
 
   /** Liste unter dem Bild – nur neu aufbauen, wenn sich die Schildtypen ändern. */
