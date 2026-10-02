@@ -16,6 +16,22 @@
   const WORK_W = 240;       // Breite der Analyse: klein = schnell, groß = erkennt weiter entfernte Schilder
   const INTERVAL_MS = 100;  // höchstens 10 Analysen pro Sekunde
 
+  // OCR wird erst geladen, wenn tatsächlich ein Schild erkannt wurde.
+  let ocrWorkerPromise = null;
+  function getOcrWorker() {
+    if (!window.Tesseract) return Promise.reject(new Error('OCR-Bibliothek nicht verfügbar'));
+    if (!ocrWorkerPromise) {
+      ocrWorkerPromise = window.Tesseract.createWorker('eng').then(async worker => {
+        await worker.setParameters({
+          tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789ÄÖÜäöüß-.,/',
+          preserve_interword_spaces: '1'
+        });
+        return worker;
+      });
+    }
+    return ocrWorkerPromise;
+  }
+
   let stream = null, running = false, still = null, lastRun = 0, lastKey = '', dims = '';
   let tracker = D.createTracker(), current = [], mask = null;
 
@@ -35,20 +51,73 @@
     const res = D.detect(img.data, work.width, work.height, { minSaturation: +$('sat').value });
     current = useTracker ? tracker.update(res.detections) : res.detections;
     mask = res.mask;
+    queueOcr(source, current, work.width, work.height);
     statusEl.textContent = (running ? 'Kamera läuft' : 'Foto analysiert') + ' · ' + Math.round(performance.now() - t0) + ' ms pro Analyse';
     renderList();
+  }
+
+  /** Text innerhalb eines Schildes lesen; Worker und Erkennung laufen asynchron. */
+  function queueOcr(source, detections, analysisW, analysisH) {
+    for (const detection of detections) {
+      if (detection.ocrQueued || detection.ocrText) continue;
+      detection.ocrQueued = true;
+      const sx = source.videoWidth || source.naturalWidth || source.width;
+      const sy = source.videoHeight || source.naturalHeight || source.height;
+      const pad = Math.max(2, Math.round(Math.min(detection.w, detection.h) * 0.08));
+      const x = Math.max(0, Math.floor((detection.x - pad) * sx / analysisW));
+      const y = Math.max(0, Math.floor((detection.y - pad) * sy / analysisH));
+      const right = Math.min(sx, Math.ceil((detection.x + detection.w + pad) * sx / analysisW));
+      const bottom = Math.min(sy, Math.ceil((detection.y + detection.h + pad) * sy / analysisH));
+      const crop = document.createElement('canvas');
+      crop.width = Math.max(1, (right - x) * 3);
+      crop.height = Math.max(1, (bottom - y) * 3);
+      const cctx = crop.getContext('2d', { willReadFrequently: true });
+      cctx.imageSmoothingEnabled = true;
+      cctx.drawImage(source, x, y, right - x, bottom - y, 0, 0, crop.width, crop.height);
+
+      getOcrWorker().then(worker => worker.recognize(crop)).then(({ data }) => {
+        // Restrict output to plausible sign text and avoid rendering OCR as HTML.
+        detection.ocrText = (data.text || '').replace(/[^\p{L}\p{N}\s.,/-]/gu, ' ').replace(/\s+/g, ' ').trim();
+        renderList();
+      }).catch(() => {
+        detection.ocrText = '';
+        detection.ocrFailed = true;
+        renderList();
+      });
+    }
   }
 
   /** Liste unter dem Bild – nur neu aufbauen, wenn sich die Schildtypen ändern. */
   function renderList() {
     const labels = [...new Set(current.map(t => t.label))];
-    const key = labels.join();
+    const key = labels.map(l => l + ':' + current.filter(t => t.label === l).map(t => t.ocrText || '').join('|')).join();
     if (key === lastKey) return;
     lastKey = key;
-    list.innerHTML = labels.length
-      ? labels.map(l => { const s = D.SIGNS[l];
-          return `<li style="--c:${s.hex}"><b>${s.name}</b><span>${s.zeichen}</span><p>${s.note}</p></li>`; }).join('')
-      : '<li class="leer">Noch kein Schild erkannt. Halte ein Schild ruhig und frontal ins Bild.</li>';
+    list.replaceChildren();
+    if (!labels.length) {
+      const empty = document.createElement('li');
+      empty.className = 'leer';
+      empty.textContent = 'Noch kein Schild erkannt. Halte ein Schild ruhig und frontal ins Bild.';
+      list.append(empty);
+      return;
+    }
+    for (const label of labels) {
+      const sign = D.SIGNS[label], li = document.createElement('li');
+      li.style.setProperty('--c', sign.hex);
+      const title = document.createElement('b'), number = document.createElement('span'), note = document.createElement('p');
+      title.textContent = sign.name;
+      number.textContent = sign.zeichen;
+      note.textContent = sign.note;
+      li.append(title, number, note);
+      const texts = [...new Set(current.filter(t => t.label === label).map(t => t.ocrText).filter(Boolean))];
+      if (texts.length) {
+        const read = document.createElement('p');
+        read.className = 'ocr-text';
+        read.textContent = 'Gelesener Text: ' + texts.join(' · ');
+        li.append(read);
+      }
+      list.append(li);
+    }
   }
 
   /** Debug: erkannte Farbflächen halbtransparent einblenden. */
@@ -69,7 +138,7 @@
     ctx.font = '600 15px Bahnschrift, "DIN Alternate", system-ui, sans-serif';
     for (const t of current) {
       const s = D.SIGNS[t.label], x = t.x * k, y = t.y * k, w = t.w * k, h = t.h * k;
-      const txt = s.name + ' ' + Math.round(t.conf * 100) + ' %', tw = ctx.measureText(txt).width + 10;
+      const txt = (t.ocrText ? t.ocrText + ' · ' : '') + s.name + ' ' + Math.round(t.conf * 100) + ' %', tw = ctx.measureText(txt).width + 10;
       const ty = y > 22 ? y - 22 : y + h + 2;
       ctx.strokeStyle = s.hex; ctx.strokeRect(x, y, w, h);
       ctx.fillStyle = s.hex; ctx.fillRect(x, ty, tw, 20);

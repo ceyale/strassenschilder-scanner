@@ -24,7 +24,7 @@ Vorteile: keine Bibliotheken, kein Modell-Download, läuft offline auf dem Handy
 
 ## 3. Ablauf pro Bild
 
-Alles in `src/detector.js`; die Funktionsnamen entsprechen den Schritten.
+Die Farb- und Formerkennung liegt in `src/detector.js`; die OCR-Anbindung liegt in `src/app.js`.
 
 1. **Verkleinern.** `app.js` zeichnet das Kamerabild auf ein Canvas mit 240 Pixeln Breite. Das macht die Analyse schnell (ca. 5–15 ms auf üblichen Handys).
 2. **Farbklassifikation (`classifyPixel`).** Jeder Pixel wird von RGB nach HSV umgerechnet (Farbton *h* in Grad, Sättigung *s*, Helligkeit *v*). HSV trennt die Farbe von der Helligkeit und ist damit robuster gegen Schatten und Sonne als RGB.
@@ -50,6 +50,7 @@ Alles in `src/detector.js`; die Funktionsnamen entsprechen den Schritten.
 6. **Schildtyp (`labelOf`).** Tabelle aus Abschnitt 2.
 7. **Sicherheit (`confidence`).** `1 − 3 · |solidity − Idealwert|`, begrenzt auf 0…1. Das ist ein Maß für die Formtreue, **keine** statistische Wahrscheinlichkeit.
 8. **Stabilisierung (`createTracker`).** Treffer im Video flackern. Der Tracker ordnet Treffer im nächsten Bild per Überlappung (IoU > 0,25, gleicher Typ) dem vorherigen zu, glättet den Rahmen und zeigt ein Schild erst nach 3 Treffern. Nach 3 Bildern ohne Treffer verschwindet es. Bei Einzelfotos ist der Tracker aus.
+9. **Texterkennung (OCR).** Für jedes bestätigte Schild wird die zugehörige Fläche aus der Bildquelle ausgeschnitten, dreifach vergrößert und mit Tesseract.js (englisches Modell, Buchstaben/Ziffern freigegeben) gelesen. Ergebnisse erscheinen unter dem Schildtyp und im Rahmen. Die Verarbeitung bleibt im Browser. Tesseract.js und das Sprachmodell werden beim ersten OCR-Einsatz über jsDelivr geladen und danach vom Browser zwischengespeichert; ohne Internet beim ersten Einsatz ist die OCR nicht verfügbar. OCR ist bei kleinen, schrägen oder unscharfen Schriftzügen unzuverlässig und kann falsche Zeichen liefern.
 
 ## 4. Einstellbare Werte
 
@@ -77,7 +78,7 @@ Für eine neue Form (z. B. Sechseck) `shapeOf` erweitern und passende Kennzahlen
 
 ## 7. Grenzen (bitte ernst nehmen)
 
-- **Keine Zahlen/Symbole.** Ein Tempo-30-Schild wird als „Verbotszeichen“ erkannt, nicht als „30“.
+- **OCR ist Näherung.** Ein Tempo-30-Schild wird als „Verbotszeichen“ erkannt; OCR versucht zusätzlich, „30“ zu lesen. Symbole werden nicht klassifiziert und OCR kann Zeichen verwechseln.
 - **Fehltreffer** durch rote/blaue/gelbe Gegenstände mit passender Form (Autos, Warnwesten, Plakate, blauer Himmel bei hoher Farbstärke). Dagegen helfen Regler und Masken-Ansicht.
 - **Verpasste Schilder** bei Gegenlicht, Dämmerung, starker Schräglage, Verdeckung, schmutzigen oder stark verblichenen Schildern.
 - **Nur frontale Sicht** ist ausgelegt. Schräg gesehene Kreise werden Ellipsen, Rechtecke Trapeze.
@@ -87,7 +88,7 @@ Für eine neue Form (z. B. Sechseck) `shapeOf` erweitern und passende Kennzahlen
 
 ## 8. Ausbaustufen
 
-1. **Zahlen lesen** (Tempolimit): Innenfläche eines Verbotskreises ausschneiden und mit Tesseract.js oder einem kleinen Ziffern-Modell erkennen.
+1. **OCR verbessern:** Schildtyp-spezifische Ausschnitte (z. B. nur die weiße Mitte beim Tempolimit) und ein deutsches Modell können die Erkennungsrate erhöhen.
 2. **Echtes ML-Modell:** Ein auf dem GTSRB-Datensatz trainiertes Netz (TensorFlow.js oder ONNX Runtime Web) klassifiziert die ausgeschnittenen Flächen. Die Farbsuche bleibt als schneller Vorfilter.
 3. **Perspektive:** Kanten/Ecken über Konturnäherung bestimmen statt Breitenprofil.
 4. **Verlauf:** erkannte Schilder mit Zeitstempel speichern.
