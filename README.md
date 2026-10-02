@@ -2,7 +2,7 @@
 
 Erkennt einfache deutsche Verkehrszeichen live mit der Handykamera – direkt im Browser, ohne Server und ohne Installation. Laufzeitbibliotheken und Modelle werden bei Bedarf geladen.
 
-Erkannt werden Schilder an **Farbe + Form**: Stopp, Vorfahrt gewähren, Gefahrzeichen, Tempolimit/Verbotszeichen, Einfahrt verboten, Gebotszeichen, Hinweiszeichen, Vorfahrtstraße, Ortstafel. Bei Tempolimits segmentiert ein kleines MNIST-CNN die Ziffern in der Bounding Box und klassifiziert sie mit ONNX Runtime Web. Auf blauen Hinweisschildern und Ortstafeln versucht deutsche OCR, den Text zu lesen. Vertikale Reihen aus roten, gelben und grünen Lichtfeldern werden als Ampeln angezeigt. Das Bild wird nicht hochgeladen. Beim ersten Start ist Internet nötig, um ONNX Runtime Web, Tesseract.js und ihre Modelle/WASM-Dateien zu laden.
+Erkannt werden Schilder an **Farbe + Form**: Stopp, Vorfahrt gewähren, Gefahrzeichen, Tempolimit/Verbotszeichen, Einfahrt verboten, Gebotszeichen, Hinweiszeichen, Vorfahrtstraße, Ortstafel. Bei Tempolimits klassifiziert ein MNIST-CNN die Ziffern in der Bounding Box. Für Texte auf blauen Hinweisschildern und Ortstafeln liest zusätzlich ein alphanumerisches CNN einzelne Zeichen; deutsche OCR ergänzt ganze Wörter und Umlaute. Vertikale Reihen aus roten, gelben und grünen Lichtfeldern werden als Ampeln angezeigt. Das Bild wird nicht hochgeladen. Beim ersten Start ist Internet nötig, um ONNX Runtime Web, Tesseract.js und ihre Modelle/WASM-Dateien zu laden.
 
 ## Schnellstart
 

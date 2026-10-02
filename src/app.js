@@ -17,7 +17,7 @@
   const INTERVAL_MS = 70;   // bis zu rund 14 Analysen pro Sekunde
 
   // Kleines MNIST-CNN; die 25 KB Gewichte werden erst bei einem Tempolimit geladen.
-  let digitSessionPromise = null, digitQueue = Promise.resolve();
+  let digitSessionPromise = null, characterSessionPromise = null, digitQueue = Promise.resolve();
   function getDigitSession() {
     if (!window.ort) return Promise.reject(new Error('ONNX Runtime Web nicht verfügbar'));
     if (!digitSessionPromise) {
@@ -30,6 +30,19 @@
       });
     }
     return digitSessionPromise;
+  }
+  function getCharacterSession() {
+    if (!window.ort) return Promise.reject(new Error('ONNX Runtime Web nicht verfügbar'));
+    if (!characterSessionPromise) {
+      window.ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/';
+      characterSessionPromise = window.ort.InferenceSession.create('models/emnist-alphanumeric.onnx', {
+        executionProviders: ['wasm'], graphOptimizationLevel: 'all'
+      }).catch(error => {
+        characterSessionPromise = null;
+        throw error;
+      });
+    }
+    return characterSessionPromise;
   }
   let textWorkerPromise = null, textQueue = Promise.resolve();
   function getTextWorker() {
@@ -136,7 +149,41 @@
     const crop = document.createElement('canvas');
     crop.width = Math.max(1, (right - x) * 2);
     crop.height = Math.max(1, (bottom - y) * 2);
-    crop.getContext('2d').drawImage(source, x, y, right - x, bottom - y, 0, 0, crop.width, crop.height);
+    const cropCtx = crop.getContext('2d', { willReadFrequently: true });
+    cropCtx.drawImage(source, x, y, right - x, bottom - y, 0, 0, crop.width, crop.height);
+    const binary = cropCtx.getImageData(0, 0, crop.width, crop.height);
+    for (let i = 0; i < binary.data.length; i += 4) {
+      const r = binary.data[i], g = binary.data[i + 1], b = binary.data[i + 2];
+      const gray = r * 0.299 + g * 0.587 + b * 0.114;
+      const foreground = detection.label === 'hinweis'
+        ? Math.min(r, g, b) > 165
+        : gray < 145;
+      const value = foreground ? 0 : 255;
+      binary.data[i] = binary.data[i + 1] = binary.data[i + 2] = value;
+    }
+    cropCtx.putImageData(binary, 0, 0);
+
+    digitQueue = digitQueue.then(async () => {
+      const session = await getCharacterSession();
+      const rows = segmentTextCharacters(binary, crop.width, crop.height);
+      const output = [];
+      for (const row of rows) {
+        let text = '';
+        for (let i = 0; i < row.length; i++) {
+          if (i && row[i].x - (row[i - 1].x + row[i - 1].w) > row[i - 1].w * 0.85) text += ' ';
+          text += await classifyCharacter(session, { image: binary, width: crop.width, part: row[i] });
+        }
+        if (text.trim()) output.push(text.trim());
+      }
+      detection.cnnText = output.join(' ');
+      renderList();
+      refreshStill();
+    }).catch(() => {
+      detection.cnnFailed = true;
+      renderList();
+    });
+
+    // Full-word OCR bleibt als Ergänzung für Umlaute und unklare Segmentierung.
     textQueue = textQueue.then(async () => {
       const worker = await getTextWorker();
       await worker.setParameters({ preserve_interword_spaces: '1' });
@@ -149,6 +196,61 @@
       renderList();
       refreshStill();
     });
+  }
+
+  /** Einzelne Zeichen der Texttafel nach Zeilen gruppieren und horizontal sortieren. */
+  function segmentTextCharacters(image, width, height) {
+    const binary = new Uint8Array(width * height), seen = new Uint8Array(width * height);
+    for (let p = 0, i = 0; i < binary.length; i++, p += 4) binary[i] = image.data[p] < 128 ? 1 : 0;
+    const queue = new Int32Array(binary.length), parts = [];
+    for (let start = 0; start < binary.length; start++) {
+      if (!binary[start] || seen[start]) continue;
+      let head = 0, tail = 0, x0 = width, x1 = 0, y0 = height, y1 = 0;
+      queue[tail++] = start; seen[start] = 1;
+      while (head < tail) {
+        const p = queue[head++], x = p % width, y = (p / width) | 0;
+        x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y);
+        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+          const nx = x + dx, ny = y + dy;
+          if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+          const next = ny * width + nx;
+          if (binary[next] && !seen[next]) { seen[next] = 1; queue[tail++] = next; }
+        }
+      }
+      const w = x1 - x0 + 1, h = y1 - y0 + 1;
+      if (h >= height * 0.07 && w >= width * 0.004 && tail >= width * height * 0.00015) parts.push({ x: x0, y: y0, w, h, area: tail });
+    }
+    const rows = [];
+    for (const part of parts.sort((a, b) => a.y - b.y || a.x - b.x)) {
+      const center = part.y + part.h / 2;
+      let row = rows.find(r => Math.abs(r.center - center) < Math.max(r.height, part.h) * 0.65);
+      if (!row) { row = { center, height: part.h, parts: [] }; rows.push(row); }
+      row.parts.push(part);
+      row.center = row.parts.reduce((sum, p) => sum + p.y + p.h / 2, 0) / row.parts.length;
+      row.height = Math.max(row.height, part.h);
+    }
+    return rows.sort((a, b) => a.center - b.center).map(row => row.parts.sort((a, b) => a.x - b.x));
+  }
+
+  /** Alphanumerische EMNIST-Zeichen auf das Eingabeformat des ONNX-CNN bringen. */
+  async function classifyCharacter(session, char) {
+    const { image, width, part } = char;
+    const side = 76, scale = Math.min(side / part.w, side / part.h);
+    const drawW = Math.max(1, Math.round(part.w * scale)), drawH = Math.max(1, Math.round(part.h * scale));
+    const left = Math.round((96 - drawW) / 2), top = Math.round((96 - drawH) / 2);
+    const input = new Float32Array(96 * 96).fill(1);
+    for (let y = 0; y < drawH; y++) for (let x = 0; x < drawW; x++) {
+      const sx = part.x + Math.min(part.w - 1, Math.floor((x + 0.5) * part.w / drawW));
+      const sy = part.y + Math.min(part.h - 1, Math.floor((y + 0.5) * part.h / drawH));
+      if (image.data[(sy * width + sx) * 4] < 128) input[(top + y) * 96 + left + x] = -1;
+    }
+    const tensor = new window.ort.Tensor('float32', input, [1, 1, 96, 96]);
+    const result = await session.run({ [session.inputNames[0]]: tensor });
+    const scores = result[session.outputNames[0]].data;
+    let best = 0;
+    for (let i = 1; i < 37; i++) if (scores[i] > scores[best]) best = i;
+    if (best === 36) return '';
+    return '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'[best];
   }
 
   /** Verbundene dunkle Ziffernformen im kontrastverstärkten Ausschnitt segmentieren. */
@@ -217,7 +319,7 @@
   function renderList() {
     const labels = [...new Set(current.map(t => t.label))];
     const key = labels.map(l => l + ':' + current.filter(t => t.label === l)
-      .map(t => (t.ocrText || '') + '/' + (t.state || '') + '/' + (t.ocrFailed ? 'failed' : '')).join('|')).join();
+      .map(t => [t.ocrText || '', t.cnnText || '', t.state || '', t.ocrFailed || '', t.cnnFailed || ''].join('/')).join('|')).join();
     if (key === lastKey) return;
     lastKey = key;
     list.replaceChildren();
@@ -244,7 +346,18 @@
         li.append(read);
       } else if (current.some(t => t.label === label && t.ocrFailed)) {
         const failed = document.createElement('p');
-        failed.textContent = 'Erkennung konnte nicht geladen werden.';
+        failed.textContent = 'Texterkennung konnte nicht geladen werden.';
+        li.append(failed);
+      }
+      const cnnTexts = [...new Set(current.filter(t => t.label === label).map(t => t.cnnText).filter(Boolean))];
+      if (cnnTexts.length) {
+        const cnn = document.createElement('p');
+        cnn.className = 'cnn-text';
+        cnn.textContent = 'CNN-Zeichen: ' + cnnTexts.join(' · ');
+        li.append(cnn);
+      } else if (current.some(t => t.label === label && t.cnnFailed)) {
+        const failed = document.createElement('p');
+        failed.textContent = 'Zeichen-CNN konnte nicht geladen werden.';
         li.append(failed);
       }
       const lightStates = [...new Set(current.filter(t => t.label === label).map(t => t.state).filter(Boolean))];
