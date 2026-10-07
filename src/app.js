@@ -13,8 +13,8 @@
   const video = $('video'), list = $('list'), statusEl = $('status');
 
   const VIEW_W = 640;       // Breite der Anzeige
-  const WORK_W = 320;       // Mehr Auflösung für kleine und entfernte Schilder
-  const INTERVAL_MS = 50;   // bis zu 20 Analysen pro Sekunde
+  const WORK_W = 400;       // mehr Details für kleine Schilder und deren Schrift
+  const INTERVAL_MS = 80;   // begrenzt die Zusatzlast der größeren Analysebilder
 
   // Kleines MNIST-CNN; die 25 KB Gewichte werden erst bei einem Tempolimit geladen.
   let digitSessionPromise = null, characterSessionPromise = null;
@@ -97,25 +97,31 @@
       detection.ocrQueued = true;
       const sx = source.videoWidth || source.naturalWidth || source.width;
       const sy = source.videoHeight || source.naturalHeight || source.height;
-      // Großzügig ausschneiden: auch dreistellige Limits reichen fast über
-      // die gesamte weiße Innenfläche. Den roten Ring entfernen wir unten per Farbe.
-      const insetX = detection.w * 0.08, insetY = detection.h * 0.08;
+      // Nur die innere Fläche ausschneiden; der rote Ring und der Bildrand
+      // dürfen keine zusätzlichen Ziffern-Komponenten erzeugen.
+      const insetX = detection.w * 0.16, insetY = detection.h * 0.16;
       const x = Math.max(0, Math.floor((detection.x + insetX) * sx / analysisW));
       const y = Math.max(0, Math.floor((detection.y + insetY) * sy / analysisH));
       const right = Math.min(sx, Math.ceil((detection.x + detection.w - insetX) * sx / analysisW));
       const bottom = Math.min(sy, Math.ceil((detection.y + detection.h - insetY) * sy / analysisH));
       const crop = document.createElement('canvas');
-      crop.width = Math.max(1, (right - x) * 2);
-      crop.height = Math.max(1, (bottom - y) * 2);
+      crop.width = Math.max(1, (right - x) * 3);
+      crop.height = Math.max(1, (bottom - y) * 3);
       const cctx = crop.getContext('2d', { willReadFrequently: true });
       cctx.imageSmoothingEnabled = true;
       cctx.drawImage(source, x, y, right - x, bottom - y, 0, 0, crop.width, crop.height);
       const pixels = cctx.getImageData(0, 0, crop.width, crop.height);
-      for (let i = 0; i < pixels.data.length; i += 4) {
+      const grayValues = new Uint8Array(crop.width * crop.height), histogram = new Uint32Array(256);
+      for (let i = 0, p = 0; i < pixels.data.length; i += 4, p++) {
         const red = pixels.data[i], green = pixels.data[i + 1], blue = pixels.data[i + 2];
-        const isRed = red > green * 1.3 && red > blue * 1.3;
-        const gray = red * 0.299 + green * 0.587 + blue * 0.114;
-        const value = !isRed && gray < 170 ? 0 : 255;
+        const isRed = red > green * 1.16 && red > blue * 1.16 && red - Math.min(green, blue) > 24;
+        const gray = Math.round(red * 0.299 + green * 0.587 + blue * 0.114);
+        grayValues[p] = isRed ? 255 : gray;
+        if (!isRed) histogram[gray]++;
+      }
+      const threshold = otsuThreshold(histogram);
+      for (let i = 0, p = 0; i < pixels.data.length; i += 4, p++) {
+        const value = grayValues[p] < threshold ? 0 : 255;
         pixels.data[i] = pixels.data[i + 1] = pixels.data[i + 2] = value;
       }
       cctx.putImageData(pixels, 0, 0);
@@ -148,17 +154,23 @@
     const right = Math.min(sx, Math.ceil((detection.x + detection.w - padX) * sx / analysisW));
     const bottom = Math.min(sy, Math.ceil((detection.y + detection.h - padY) * sy / analysisH));
     const crop = document.createElement('canvas');
-    crop.width = Math.max(1, (right - x) * 2);
-    crop.height = Math.max(1, (bottom - y) * 2);
+    crop.width = Math.max(1, (right - x) * 3);
+    crop.height = Math.max(1, (bottom - y) * 3);
     const cropCtx = crop.getContext('2d', { willReadFrequently: true });
     cropCtx.drawImage(source, x, y, right - x, bottom - y, 0, 0, crop.width, crop.height);
     const binary = cropCtx.getImageData(0, 0, crop.width, crop.height);
-    for (let i = 0; i < binary.data.length; i += 4) {
+    const histogram = new Uint32Array(256), grayValues = new Uint8Array(crop.width * crop.height);
+    for (let i = 0, p = 0; i < binary.data.length; i += 4, p++) {
       const r = binary.data[i], g = binary.data[i + 1], b = binary.data[i + 2];
-      const gray = r * 0.299 + g * 0.587 + b * 0.114;
-      const foreground = detection.label === 'hinweis'
-        ? Math.min(r, g, b) > 165
-        : gray < 145;
+      grayValues[p] = Math.round(r * 0.299 + g * 0.587 + b * 0.114);
+      histogram[grayValues[p]]++;
+    }
+    const otsu = otsuThreshold(histogram);
+    const threshold = detection.label === 'hinweis'
+      ? Math.max(150, otsu)
+      : Math.max(75, Math.min(185, otsu));
+    for (let i = 0, p = 0; i < binary.data.length; i += 4, p++) {
+      const foreground = detection.label === 'hinweis' ? grayValues[p] > threshold : grayValues[p] < threshold;
       const value = foreground ? 0 : 255;
       binary.data[i] = binary.data[i + 1] = binary.data[i + 2] = value;
     }
@@ -170,7 +182,7 @@
       const output = [];
       for (const row of rows) {
         let text = '';
-        for (let i = 0; i < row.length; i++) {
+        for (let i = 0; i < Math.min(row.length, 24); i++) {
           if (i && row[i].x - (row[i - 1].x + row[i - 1].w) > row[i - 1].w * 0.85) text += ' ';
           text += await classifyCharacter(session, { image: binary, width: crop.width, part: row[i] });
         }
@@ -189,7 +201,9 @@
       const worker = await getTextWorker();
       await worker.setParameters({ preserve_interword_spaces: '1' });
       const { data } = await worker.recognize(crop);
-      detection.ocrText = (data.text || '').replace(/[^\p{L}\p{N}\s.,'’/-]/gu, ' ').replace(/\s+/g, ' ').trim();
+      const confidentWords = (data.words || []).filter(word => word.confidence >= 35).map(word => word.text);
+      const text = confidentWords.length ? confidentWords.join(' ') : (data.text || '');
+      detection.ocrText = text.replace(/[^\p{L}\p{N}\s.,'’/-]/gu, ' ').replace(/\s+/g, ' ').trim();
       renderList();
       refreshStill();
     }).catch(() => {
@@ -197,6 +211,24 @@
       renderList();
       refreshStill();
     });
+  }
+
+  /** Otsu-Schwelle: passt den Kontrastfilter an Belichtung und Schildfarbe an. */
+  function otsuThreshold(histogram) {
+    let total = 0, sum = 0;
+    for (let i = 0; i < 256; i++) { total += histogram[i]; sum += i * histogram[i]; }
+    let backgroundWeight = 0, backgroundSum = 0, bestVariance = -1, threshold = 128;
+    for (let i = 0; i < 256; i++) {
+      backgroundWeight += histogram[i];
+      if (!backgroundWeight) continue;
+      const foregroundWeight = total - backgroundWeight;
+      if (!foregroundWeight) break;
+      backgroundSum += i * histogram[i];
+      const delta = backgroundSum / backgroundWeight - (sum - backgroundSum) / foregroundWeight;
+      const variance = backgroundWeight * foregroundWeight * delta * delta;
+      if (variance > bestVariance) { bestVariance = variance; threshold = i; }
+    }
+    return threshold;
   }
 
   /** Einzelne Zeichen der Texttafel nach Zeilen gruppieren und horizontal sortieren. */
@@ -250,7 +282,10 @@
     const scores = result[session.outputNames[0]].data;
     let best = 0;
     for (let i = 1; i < 37; i++) if (scores[i] > scores[best]) best = i;
-    if (best === 36) return '';
+    const max = scores[best];
+    let denominator = 0;
+    for (let i = 0; i < 37; i++) denominator += Math.exp(scores[i] - max);
+    if (best === 36 || 1 / denominator < 0.32) return '';
     return '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'[best];
   }
 
@@ -351,7 +386,7 @@
         li.append(failed);
       }
       const cnnTexts = [...new Set(current.filter(t => t.label === label).map(t => t.cnnText).filter(Boolean))];
-      if (cnnTexts.length) {
+      if (cnnTexts.length && (!texts.length || cnnTexts.some(text => !texts.includes(text)))) {
         const cnn = document.createElement('p');
         cnn.className = 'cnn-text';
         cnn.textContent = 'CNN-Zeichen: ' + cnnTexts.join(' · ');
@@ -419,11 +454,12 @@
     // Modell und WASM parallel zur Kameraberechtigung laden, damit die erste
     // erkannte Tempolimit-Zahl nicht auf den Kaltstart warten muss.
     getDigitSession().catch(() => {});
+    getCharacterSession().catch(() => {});
     try {
       stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 } }, audio: false });
       video.srcObject = stream; await video.play();
-      still = null; tracker = D.createTracker(2, 3); running = true;
+      still = null; tracker = D.createTracker(4, 2); running = true;
       $('camBtn').textContent = 'Kamera stoppen';
       requestAnimationFrame(frame);
     } catch (err) {

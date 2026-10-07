@@ -16,13 +16,13 @@
 
   /** Schwellwerte. Alle Größen in Pixeln des verkleinerten Analysebilds. */
   const CONFIG = {
-    minSaturation: 0.45, // etwas toleranter bei blassen/komprimierten Kamerabildern
-    minValue: 0.22,      // Helligkeit, darunter wird ein Pixel ignoriert
-    minBox: 8,           // kleinere Flächen bei höherer Analyseauflösung zulassen
-    minArea: 28,         // kleinste Pixelanzahl einer Fläche
-    maxFrameShare: 0.9,  // Flächen, die fast das ganze Bild füllen, sind kein Schild
-    minAspect: 0.3,      // längliche Hinweis- und Ortstafeln einschließen
-    maxAspect: 3.5
+    minSaturation: 0.52,
+    minValue: 0.2,
+    minBox: 10,
+    minArea: 38,
+    maxFrameShare: 0.92,
+    minAspect: 0.7,
+    maxAspect: 4.5
   };
 
   /** Katalog der erkennbaren Schilder (Zeichen-Nummern nach StVO). */
@@ -50,10 +50,10 @@
     if (max === r) h = 60 * (((g - b) / d + 6) % 6);
     else if (max === g) h = 60 * ((b - r) / d + 2);
     else h = 60 * ((r - g) / d + 4);
-    if (h <= 14 || h >= 345) return RED;          // Rot liegt am Rand des Farbkreises
-    if (h >= 38 && h <= 66 && v > 0.45) return YELLOW;
-    if (h >= 200 && h <= 255) return BLUE;
-    if (h >= 75 && h <= 165) return GREEN;
+    if (h <= 20 || h >= 337) return RED;          // Rot liegt am Rand des Farbkreises
+    if (h >= 30 && h <= 72 && v > 0.35) return YELLOW;
+    if (h >= 185 && h <= 265) return BLUE;
+    if (h >= 68 && h <= 175) return GREEN;
     return NONE;
   }
 
@@ -154,6 +154,64 @@
     return null;
   }
 
+  /** Schildtypische Form-, Farb- und Innenflächenmerkmale gegen Farbflecken prüfen. */
+  function signEvidence(data, mask, imageW, comp, shape) {
+    const aspect = comp.w / comp.h;
+    const shapeRanges = {
+      circle: [0.7, 1.4, 0.67, 0.91], octagon: [0.78, 1.28, 0.69, 0.92],
+      triangleUp: [0.7, 1.4, 0.34, 0.67], triangleDown: [0.7, 1.4, 0.34, 0.67],
+      diamond: [0.7, 1.4, 0.34, 0.67], rect: [0.85, 4.5, 0.82, 1.02]
+    }[shape];
+    const stats = analyzeShape(comp, mask.queue, imageW);
+    if (!shapeRanges || aspect < shapeRanges[0] || aspect > shapeRanges[1] ||
+        stats.solidity < shapeRanges[2] || stats.solidity > shapeRanges[3]) return null;
+
+    let expected = 0, colored = 0, neutral = 0, interior = 0;
+    for (let y = comp.y; y < comp.y + comp.h; y++) for (let x = comp.x; x < comp.x + comp.w; x++) {
+      const nx = (x - comp.x + 0.5) / comp.w, ny = (y - comp.y + 0.5) / comp.h;
+      let inside = false;
+      if (shape === 'circle') inside = ((nx - 0.5) / 0.5) ** 2 + ((ny - 0.5) / 0.5) ** 2 <= 1;
+      else if (shape === 'octagon') inside = Math.abs(nx - 0.5) <= 0.5 && Math.abs(ny - 0.5) <= 0.5 && Math.abs(nx - 0.5) + Math.abs(ny - 0.5) <= 0.72;
+      else if (shape === 'triangleUp') inside = ny >= Math.abs(nx - 0.5) * 2;
+      else if (shape === 'triangleDown') inside = 1 - ny >= Math.abs(nx - 0.5) * 2;
+      else if (shape === 'diamond') inside = Math.abs(nx - 0.5) + Math.abs(ny - 0.5) <= 0.5;
+      else inside = true;
+      if (!inside) continue;
+      expected++;
+      const p = y * imageW + x, color = mask.pixels[p];
+      if (color === comp.color) colored++;
+      const i = p * 4, r = data[i], g = data[i + 1], b = data[i + 2], max = Math.max(r, g, b);
+      const saturation = max ? (max - Math.min(r, g, b)) / max : 0;
+      const core = (nx - 0.5) ** 2 + (ny - 0.5) ** 2 < 0.12;
+      if (core) { interior++; if (saturation < 0.42) neutral++; }
+    }
+    const colorShare = colored / Math.max(1, expected);
+    const neutralShare = neutral / Math.max(1, interior);
+    if (colorShare < (comp.color === RED ? 0.07 : 0.24)) return null;
+    const needsInteriorDetail = comp.color === RED || comp.color === BLUE || (comp.color === YELLOW && shape === 'rect');
+    if (needsInteriorDetail && neutralShare < (comp.color === RED ? 0.12 : 0.08)) return null;
+
+    // Ein echter roter Kreis trägt einen umlaufenden Ring. Einzelne rote
+    // Kreisflächen wie Rücklichter bestehen diese Winkelabdeckung meist nicht.
+    if (comp.color === RED && shape === 'circle') {
+      let covered = 0;
+      for (let sector = 0; sector < 16; sector++) {
+        const angle = (sector + 0.5) * Math.PI * 2 / 16;
+        const x = Math.round(comp.x + comp.w * (0.5 + Math.cos(angle) * 0.39));
+        const y = Math.round(comp.y + comp.h * (0.5 + Math.sin(angle) * 0.39));
+        let found = false;
+        for (let dy = -1; dy <= 1 && !found; dy++) for (let dx = -1; dx <= 1; dx++) {
+          const px = x + dx, py = y + dy;
+          if (px >= 0 && px < imageW && py >= 0 && py < mask.height && mask.pixels[py * imageW + px] === RED) { found = true; break; }
+        }
+        if (found) covered++;
+      }
+      if (covered < 12) return null;
+    }
+    const shapeConf = confidence(shape, stats.solidity);
+    return shapeConf * 0.72 + Math.min(1, colorShare * 1.5) * 0.18 + Math.min(1, neutralShare * 2) * 0.1;
+  }
+
   /** Sicherheit 0..1: wie nah liegt die gemessene Füllung am Idealwert der Form? */
   const IDEAL = { circle: 0.785, octagon: 0.828, triangleUp: 0.5, triangleDown: 0.5, diamond: 0.5, rect: 1 };
   const confidence = (shape, solidity) => Math.max(0, Math.min(1, 1 - Math.abs(solidity - IDEAL[shape]) * 3));
@@ -200,17 +258,43 @@
 
   function detect(data, w, h, options) {
     const cfg = Object.assign({}, CONFIG, options);
-    const mask = buildMask(data, w, h, cfg);
-    const { comps, queue } = findComponents(mask, w, h, cfg);
+    const pixels = buildMask(data, w, h, cfg);
+    const mask = { pixels, height: h };
+    const { comps, queue } = findComponents(pixels, w, h, cfg);
+    mask.queue = queue;
     const detections = [];
     for (const c of comps) {
       const s = analyzeShape(c, queue, w);
       const shape = shapeOf(s, c.w / c.h);
       const label = shape && labelOf(c.color, shape, s.fill, s);
-      if (label) detections.push({ label, shape, x: c.x, y: c.y, w: c.w, h: c.h, conf: confidence(shape, s.solidity) });
+      if (!label) continue;
+      const conf = signEvidence(data, mask, w, c, shape);
+      if (conf >= 0.78) detections.push({ label, shape, x: c.x, y: c.y, w: c.w, h: c.h, conf });
     }
     detections.push(...detectTrafficLights(comps, queue, data, w));
-    return { detections, mask };
+    return { detections: suppressNestedDetections(detections), mask: pixels };
+  }
+
+  /** Farbige Innenformen nicht zusätzlich als eigenständige Schilder melden. */
+  function suppressNestedDetections(detections) {
+    const ranked = detections.slice().sort((a, b) => b.conf - a.conf || (b.w * b.h) - (a.w * a.h));
+    const kept = [];
+    for (const candidate of ranked) {
+      const area = candidate.w * candidate.h;
+      const insideExisting = kept.some(parent => {
+        const parentArea = parent.w * parent.h;
+        const iw = Math.max(0, Math.min(parent.x + parent.w, candidate.x + candidate.w) - Math.max(parent.x, candidate.x));
+        const ih = Math.max(0, Math.min(parent.y + parent.h, candidate.y + candidate.h) - Math.max(parent.y, candidate.y));
+        const overlap = iw * ih;
+        // Eine Rahmenform darf nicht durch ihre Schrift, Symbole oder Farbflecken
+        // als mehrere innere Schilder erscheinen. Auch fast deckungsgleiche
+        // Mehrfachkonturen werden zusammengeführt.
+        return (parentArea >= area * 1.12 && overlap / Math.max(1, area) > 0.68) ||
+          (overlap / Math.max(1, area) > 0.88 && overlap / Math.max(1, parentArea) > 0.72);
+      });
+      if (!insideExisting) kept.push(candidate);
+    }
+    return kept;
   }
 
   /** Schritt 5: Treffer über Bilder hinweg verfolgen. Ein Schild gilt erst nach 3 Treffern als sicher. */
