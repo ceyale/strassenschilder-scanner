@@ -135,9 +135,12 @@
   }
 
   /** Schritt 4b: Farbe + Form → Schildtyp (oder null). */
-  function labelOf(color, shape, fill) {
+  function labelOf(color, shape, fill, stats) {
     if (color === RED) {
       if (shape === 'octagon') return 'stop';
+      // Stopp-Achtecke bleiben mit breiten oberen und unteren Kanten erkennbar,
+      // auch wenn Schrift, Unschärfe oder Perspektive die Füllung/Solidity senken.
+      if (shape === 'circle' && stats.wTop > 0.64 && stats.wBot > 0.64 && stats.solidity > 0.76 && stats.fill > 0.4) return 'stop';
       if (shape === 'triangleDown') return 'vorfahrtGewaehren';
       if (shape === 'triangleUp') return 'warnung';
       if (shape === 'circle') return fill > 0.65 ? 'einfahrtVerboten' : 'verbot';
@@ -203,7 +206,7 @@
     for (const c of comps) {
       const s = analyzeShape(c, queue, w);
       const shape = shapeOf(s, c.w / c.h);
-      const label = shape && labelOf(c.color, shape, s.fill);
+      const label = shape && labelOf(c.color, shape, s.fill, s);
       if (label) detections.push({ label, shape, x: c.x, y: c.y, w: c.w, h: c.h, conf: confidence(shape, s.solidity) });
     }
     detections.push(...detectTrafficLights(comps, queue, data, w));

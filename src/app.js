@@ -14,10 +14,11 @@
 
   const VIEW_W = 640;       // Breite der Anzeige
   const WORK_W = 320;       // Mehr Auflösung für kleine und entfernte Schilder
-  const INTERVAL_MS = 70;   // bis zu rund 14 Analysen pro Sekunde
+  const INTERVAL_MS = 50;   // bis zu 20 Analysen pro Sekunde
 
   // Kleines MNIST-CNN; die 25 KB Gewichte werden erst bei einem Tempolimit geladen.
-  let digitSessionPromise = null, characterSessionPromise = null, digitQueue = Promise.resolve();
+  let digitSessionPromise = null, characterSessionPromise = null;
+  let digitQueue = Promise.resolve(), characterQueue = Promise.resolve();
   function getDigitSession() {
     if (!window.ort) return Promise.reject(new Error('ONNX Runtime Web nicht verfügbar'));
     if (!digitSessionPromise) {
@@ -163,7 +164,7 @@
     }
     cropCtx.putImageData(binary, 0, 0);
 
-    digitQueue = digitQueue.then(async () => {
+    characterQueue = characterQueue.then(async () => {
       const session = await getCharacterSession();
       const rows = segmentTextCharacters(binary, crop.width, crop.height);
       const output = [];
@@ -415,6 +416,9 @@
       statusEl.textContent = 'Kein Kamerazugriff. Die Seite muss über HTTPS (z. B. GitHub Pages) geöffnet werden.';
       return;
     }
+    // Modell und WASM parallel zur Kameraberechtigung laden, damit die erste
+    // erkannte Tempolimit-Zahl nicht auf den Kaltstart warten muss.
+    getDigitSession().catch(() => {});
     try {
       stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 } }, audio: false });
