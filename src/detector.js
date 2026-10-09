@@ -16,10 +16,10 @@
 
   /** Schwellwerte. Alle Größen in Pixeln des verkleinerten Analysebilds. */
   const CONFIG = {
-    minSaturation: 0.52,
+    minSaturation: 0.38,
     minValue: 0.2,
-    minBox: 10,
-    minArea: 38,
+    minBox: 8,
+    minArea: 30,
     maxFrameShare: 0.92,
     minAspect: 0.7,
     maxAspect: 4.5
@@ -262,7 +262,7 @@
       const label = shape && labelOf(c.color, shape, s.fill, s);
       if (!label) continue;
       const conf = signEvidence(data, mask, w, c, shape);
-      if (conf >= 0.78) detections.push({ label, shape, x: c.x, y: c.y, w: c.w, h: c.h, conf });
+      if (conf >= 0.38) detections.push({ label, shape, x: c.x, y: c.y, w: c.w, h: c.h, conf });
     }
     detections.push(...detectTrafficLights(comps, queue, data, w));
     return { detections: suppressNestedDetections(detections), mask: pixels };

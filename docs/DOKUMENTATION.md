@@ -32,8 +32,8 @@ Die Farb- und Formerkennung liegt in `src/detector.js`; die OCR-Anbindung liegt 
    - Gelb: *h* 38°–66°, *v* > 0,45
    - Blau: *h* 200°–255°
    - Grün: *h* 75°–165° (für Ampellinsen)
-   - Voraussetzung immer: *s* ≥ `minSaturation` (Regler „Farbstrenge“, Startwert 0,45) und *v* ≥ 0,22. Graue, weiße und schwarze Pixel fallen so heraus.
-3. **Zusammenhängende Flächen (`findComponents`).** Flood-Fill mit 4er-Nachbarschaft sammelt gleichfarbige Pixel zu Flächen. Jede Fläche bekommt einen Rahmen (Bounding Box). Verworfen werden Flächen, die zu klein sind (Kantenlänge < 8 px, Fläche < 28 px), ein unpassendes Seitenverhältnis haben (außerhalb 0,3–3,5) oder fast das ganze Bild füllen (> 90 %).
+   - Voraussetzung immer: *s* ≥ `minSaturation` (Regler „Farbstrenge“, Startwert 0,38) und *v* ≥ 0,22.
+3. **Zusammenhängende Flächen (`findComponents`).** Flood-Fill mit 4er-Nachbarschaft sammelt gleichfarbige Pixel zu Flächen. Jede Fläche bekommt einen Rahmen (Bounding Box). Verworfen werden Flächen, die zu klein sind (Kantenlänge < 8 px, Fläche < 30 px), ein unpassendes Seitenverhältnis haben (außerhalb 0,3–3,5) oder fast das ganze Bild füllen (> 90 %).
 4. **Umriss vermessen (`analyzeShape`).** Pro Bildzeile zählt nur der äußerste linke und rechte Pixel der Fläche. Dadurch wird ein roter *Ring* zur gefüllten *Silhouette*. Daraus entstehen vier Kennzahlen:
 
    | Kennzahl | Bedeutung |
@@ -61,6 +61,7 @@ Die Farb- und Formerkennung liegt in `src/detector.js`; die OCR-Anbindung liegt 
 |---|---|---|
 | Farbstrenge | Regler in der Oberfläche (`minSaturation`) | Höher: weniger Fehltreffer, aber blasse Schilder fehlen. Niedriger: bei Dämmerung oder verblichenen Schildern. |
 | Farbmasken zeigen | Häkchen | Legt die erkannten Farbflächen über das Bild. Damit sieht man, warum ein Schild (nicht) erkannt wird. |
+| Farbstrenge | Regler | Startwert 0,38. Höher senkt Fehlalarme, niedriger nimmt blassere Flächen an. |
 | `WORK_W` | `src/app.js` | Analysebreite. Größer erkennt kleinere/entferntere Schilder, kostet Rechenzeit. |
 | `INTERVAL_MS` | `src/app.js` | Abstand zwischen zwei Analysen. |
 | `CONFIG` | `src/detector.js` | Mindestgrößen, Seitenverhältnis, Helligkeit. |
@@ -83,7 +84,7 @@ Für eine neue Form (z. B. Sechseck) `shapeOf` erweitern und passende Kennzahlen
 
 - **Ziffern-CNN ist Näherung.** Das MNIST-CNN wurde nicht auf Verkehrszeichen trainiert. Unschärfe, kleine Schilder, zusammengeklebte Ziffern und Schräglage können zu falschen Ziffern führen.
 - **Ampelerkennung ist eingeschränkt.** Die Heuristik verlangt sichtbare rote, gelbe und grüne Linsen im Bild. Sie findet keine verdeckten oder dunklen Lampen und ist nicht für Fahrentscheidungen gedacht.
-- **Fehltreffer** durch rote/blaue/gelbe Gegenstände mit passender Form (Autos, Warnwesten, Plakate, blauer Himmel bei hoher Farbstärke). Dagegen helfen Regler und Masken-Ansicht.
+- **Fehltreffer** können durch farbähnliche Gegenstände oder unsichere CNN-Klassen entstehen. Erhöhe „Farbstrenge“, wenn mehr Präzision nötig ist.
 - **Verpasste Schilder** bei Gegenlicht, Dämmerung, starker Schräglage, Verdeckung, schmutzigen oder stark verblichenen Schildern.
 - **Nur frontale Sicht** ist ausgelegt. Schräg gesehene Kreise werden Ellipsen, Rechtecke Trapeze.
 - **Nur deutsche Schilder.** Andere Länder nutzen teils andere Farben/Formen.

@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Schilder-Scanner Backend</title>
+<style>
+body{font:16px system-ui,sans-serif;max-width:760px;margin:3rem auto;padding:0 1rem;background:#1e2329;color:#f3f5f7}
+h1{font-size:1.6rem}#time{color:#aab3bd}li{background:#303941;margin:.6rem 0;padding:1rem;border-radius:.7rem;list-style:none}ul{padding:0}.empty{color:#aab3bd}#frame{display:none;max-width:100%;max-height:55vh;border-radius:.6rem;margin:1rem 0;background:#080a0c}#frame.visible{display:block}
+</style>
+</head>
+<body>
+<h1>Empfangene Schilder</h1><p id="time">Warte auf Website …</p><img id="frame" alt="Zuletzt gesendetes komprimiertes JPEG-Kamerabild"><ul id="signs"><li class="empty">Noch keine Daten empfangen.</li></ul>
+<script>
+let lastImage='';async function refresh(){try{const r=await fetch('/api/state');const s=await r.json();document.querySelector('#time').textContent=s.receivedAt?'Letzter Empfang: '+new Date(s.receivedAt).toLocaleString():'Warte auf Website …';const frame=document.querySelector('#frame');if(s.imageAvailable&&s.receivedAt){if(lastImage!==s.receivedAt){frame.src='/api/image?v='+encodeURIComponent(s.receivedAt);lastImage=s.receivedAt}frame.classList.add('visible')}else frame.classList.remove('visible');const list=document.querySelector('#signs');list.replaceChildren();if(!s.signs.length){list.innerHTML='<li class="empty">Aktuell kein Schild erkannt.</li>';return}for(const item of s.signs){const li=document.createElement('li');li.textContent=[item.name,item.value!=null?item.value+' km/h':'',item.text,item.confidence!=null?'Sicherheit '+Math.round(item.confidence*100)+' %':''].filter(Boolean).join(' · ');list.append(li)}}catch{document.querySelector('#time').textContent='Backend nicht erreichbar'}}refresh();setInterval(refresh,300);
+</script>
+</body>
+</html>

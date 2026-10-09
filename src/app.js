@@ -9,8 +9,12 @@
   const TEXT_SIGN_LABELS = new Set(['hinweis', 'ortstafel']);
   const GTSRB_SPEED_CLASSES = new Map([[0, 20], [1, 30], [2, 50], [3, 60], [4, 70], [5, 80], [7, 100], [8, 120]]);
   const GTSRB_WARNING_CLASSES = new Set([11, ...Array.from({ length: 14 }, (_, i) => i + 18)]);
+  // Lower thresholds accept more uncertain CNN predictions (and may add false positives).
+  const MIN_SIGN_CONFIDENCE = 0.22;
+  const MIN_SIGN_MARGIN = 0.05;
   const $ = id => document.getElementById(id);
   const view = $('view'), ctx = view.getContext('2d');           // sichtbares Bild + Rahmen
+  const backendUrlInput = $('backendUrl'), backendStatus = $('backendStatus');
   const work = document.createElement('canvas');                  // kleines Bild für die Analyse
   const wctx = work.getContext('2d', { willReadFrequently: true });
   const maskCv = document.createElement('canvas');                // Farbmasken-Ansicht (Debug)
@@ -61,6 +65,75 @@
 
   let stream = null, running = false, still = null, lastRun = 0, lastKey = '', dims = '';
   let tracker = D.createTracker(4, 2), current = [], mask = null;
+  let lastBackendKey = '', backendRetryAt = 0, lastBackendSentAt = 0;
+
+  backendUrlInput.value = localStorage.getItem('signScannerBackendUrl') || '';
+  backendUrlInput.addEventListener('change', () => {
+    localStorage.setItem('signScannerBackendUrl', backendUrlInput.value.trim());
+    lastBackendKey = '';
+    publishBackendSnapshot();
+  });
+
+  /** Send only confirmed, currently visible signs to the configured PC service. */
+  function publishBackendSnapshot() {
+    const signs = current.filter(t => !t.rejected && (!CNN_SIGN_LABELS.has(t.label) || t.cnnVerified) && (!TEXT_SIGN_LABELS.has(t.label) || t.textVerified));
+    const items = signs.map(t => ({
+      label: t.label,
+      name: D.SIGNS[t.label].name,
+      value: t.label === 'verbot' ? Number((t.cnnText || '').match(/\d+/)?.[0]) || null : null,
+      text: t.ocrText || t.cnnText || t.state || '',
+      confidence: Number(t.conf.toFixed(3))
+    }));
+    const key = JSON.stringify(items);
+    if ((key === lastBackendKey && (!running || Date.now() - lastBackendSentAt < 250)) || Date.now() < backendRetryAt) return;
+    const endpoint = backendUrlInput.value.trim() || (location.protocol.startsWith('http') ? location.origin + '/api/signs' : '');
+    if (!endpoint) { backendStatus.textContent = 'Adresse fehlt (Backend läuft auf dem PC).'; return; }
+    backendStatus.textContent = 'Sende erkannte Schilder …';
+    const jpegFrame = (running || still) ? createAnnotatedJpeg() : null;
+    fetch(endpoint, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: 'strassenschilder-scanner', detectedAt: new Date().toISOString(), signs: items, imageJpeg: jpegFrame })
+    }).then(response => {
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      lastBackendKey = key;
+      lastBackendSentAt = Date.now();
+      backendStatus.textContent = 'Mit PC-Backend verbunden · ' + items.length + ' Schild(er)';
+    }).catch(error => {
+      backendRetryAt = Date.now() + 5000;
+      backendStatus.textContent = 'Backend nicht erreichbar: ' + error.message;
+    });
+  }
+
+  /** Encode the current analysis frame with the same detection boxes as the preview. */
+  function createAnnotatedJpeg() {
+    const canvas = document.createElement('canvas');
+    const outputScale = Math.min(1, 480 / work.width);
+    canvas.width = Math.round(work.width * outputScale);
+    canvas.height = Math.round(work.height * outputScale);
+    const previewCtx = canvas.getContext('2d');
+    previewCtx.setTransform(outputScale, 0, 0, outputScale, 0, 0);
+    previewCtx.drawImage(work, 0, 0);
+    const markScale = Math.max(1, work.width / 320);
+    previewCtx.lineWidth = markScale * 2;
+    previewCtx.font = `600 ${Math.max(12, Math.round(work.width / 48))}px system-ui, sans-serif`;
+    previewCtx.textBaseline = 'top';
+    for (const detection of current) {
+      if (detection.rejected || (CNN_SIGN_LABELS.has(detection.label) && !detection.cnnVerified) || (TEXT_SIGN_LABELS.has(detection.label) && !detection.textVerified)) continue;
+      const sign = D.SIGNS[detection.label];
+      if (!sign) continue;
+      const { x, y, w, h } = detection;
+      const label = (detection.ocrText ? detection.ocrText + ' · ' : '') + sign.name + ' ' + Math.round(detection.conf * 100) + '%';
+      const labelWidth = Math.min(work.width - x, previewCtx.measureText(label).width + markScale * 8);
+      const labelY = y > markScale * 24 ? y - markScale * 24 : y + h;
+      previewCtx.strokeStyle = sign.hex;
+      previewCtx.strokeRect(x, y, w, h);
+      previewCtx.fillStyle = sign.hex;
+      previewCtx.fillRect(x, labelY, labelWidth, markScale * 23);
+      previewCtx.fillStyle = sign.text;
+      previewCtx.fillText(label, x + markScale * 4, labelY + markScale * 3);
+    }
+    return canvas.toDataURL('image/jpeg', 0.35);
+  }
 
   /** Canvas-Größen an die Bildquelle anpassen (Seitenverhältnis beibehalten). */
   function setSize(sw, sh) {
@@ -115,7 +188,7 @@
         // Das Verkehrszeichen-CNN klassifiziert direkt den gesamten Kandidaten.
         const signSession = await getSignSession();
         const signClass = await classifyTrafficSign(signSession, signCrop);
-        if (signClass.index === 14 && signClass.confidence >= 0.82 && signClass.margin >= 0.3) {
+        if (signClass.index === 14 && signClass.confidence >= MIN_SIGN_CONFIDENCE && signClass.margin >= MIN_SIGN_MARGIN) {
           detection.label = 'stop';
           detection.cnnVerified = true;
           detection.stopVerified = true;
@@ -125,35 +198,35 @@
           refreshStill();
           return;
         }
-        if (signClass.index === 17 && signClass.confidence >= 0.82 && signClass.margin >= 0.3) {
+        if (signClass.index === 17 && signClass.confidence >= MIN_SIGN_CONFIDENCE && signClass.margin >= MIN_SIGN_MARGIN) {
           detection.label = 'einfahrtVerboten';
           detection.cnnVerified = true;
           renderList();
           refreshStill();
           return;
         }
-        if (signClass.index === 13 && signClass.confidence >= 0.78 && signClass.margin >= 0.28) {
+        if (signClass.index === 13 && signClass.confidence >= MIN_SIGN_CONFIDENCE && signClass.margin >= MIN_SIGN_MARGIN) {
           detection.label = 'vorfahrtGewaehren';
           detection.cnnVerified = true;
           renderList();
           refreshStill();
           return;
         }
-        if (GTSRB_WARNING_CLASSES.has(signClass.index) && signClass.confidence >= 0.78 && signClass.margin >= 0.28) {
+        if (GTSRB_WARNING_CLASSES.has(signClass.index) && signClass.confidence >= MIN_SIGN_CONFIDENCE && signClass.margin >= MIN_SIGN_MARGIN) {
           detection.label = 'warnung';
           detection.cnnVerified = true;
           renderList();
           refreshStill();
           return;
         }
-        if (signClass.index === 12 && signClass.confidence >= 0.82 && signClass.margin >= 0.3) {
+        if (signClass.index === 12 && signClass.confidence >= MIN_SIGN_CONFIDENCE && signClass.margin >= MIN_SIGN_MARGIN) {
           detection.label = 'vorfahrtstrasse';
           detection.cnnVerified = true;
           renderList();
           refreshStill();
           return;
         }
-        if (signClass.index >= 33 && signClass.index <= 40 && signClass.confidence >= 0.82 && signClass.margin >= 0.3) {
+        if (signClass.index >= 33 && signClass.index <= 40 && signClass.confidence >= MIN_SIGN_CONFIDENCE && signClass.margin >= MIN_SIGN_MARGIN) {
           detection.label = 'gebot';
           detection.cnnVerified = true;
           renderList();
@@ -161,7 +234,7 @@
           return;
         }
         const expectedSpeed = GTSRB_SPEED_CLASSES.get(signClass.index);
-        if (!expectedSpeed || signClass.confidence < 0.55 || signClass.margin < 0.12) {
+        if (!expectedSpeed || signClass.confidence < MIN_SIGN_CONFIDENCE || signClass.margin < MIN_SIGN_MARGIN) {
           detection.rejected = true;
           renderList();
           refreshStill();
@@ -405,6 +478,7 @@
 
   function renderList() {
     const shown = current.filter(t => !t.rejected && (!CNN_SIGN_LABELS.has(t.label) || t.cnnVerified) && (!TEXT_SIGN_LABELS.has(t.label) || t.textVerified));
+    publishBackendSnapshot();
     const labels = [...new Set(shown.map(t => t.label))];
     const key = labels.map(l => l + ':' + shown.filter(t => t.label === l)
       .map(t => [t.ocrText || '', t.cnnText || '', t.state || '', t.ocrFailed || '', t.cnnFailed || ''].join('/')).join('|')).join();

@@ -16,6 +16,11 @@ button, .btn { font: inherit; font-weight: 600; background: var(--blue); color: 
 .btn input { display: none; }
 button:focus-visible, .btn:focus-within, input:focus-visible { outline: 3px solid var(--marking); outline-offset: 2px; }
 .tune { color: var(--muted); font-size: .95rem; }
+.backend-settings { margin-top: 14px; padding: 10px 12px; background: var(--panel); border-radius: 6px; }
+.backend-settings summary { cursor: pointer; font-weight: 600; }
+.backend-settings label { display: grid; gap: 6px; margin-top: 10px; }
+.backend-settings input { width: 100%; padding: 9px; border: 1px solid var(--muted); border-radius: 4px; font: inherit; }
+.backend-settings small { display: block; margin-top: 8px; color: var(--muted); }
 ul { list-style: none; padding: 0; margin: 16px 0 0; display: grid; gap: 8px; }
 li { background: var(--panel); border-left: 8px solid var(--c, var(--muted)); padding: 10px 14px; border-radius: 0 6px 6px 0; }
 li span { color: var(--muted); margin-left: 8px; }
