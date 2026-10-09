@@ -1,0 +1,22 @@
+{
+  "id": "raphbre/traffic-sign-box-detector-cpu-320-vs-512",
+  "id_no": 137919267,
+  "title": "Traffic sign box detector CPU 320 vs 512",
+  "code_file": "traffic-sign-box-detector-cpu-320-vs-512.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "keywords": [],
+  "dataset_sources": [
+    "sovitrath/gtsdb-dataset-in-pascal-voc-structure",
+    "meowmeowmeowmeowmeow/gtsrb-german-traffic-sign"
+  ],
+  "kernel_sources": [],
+  "competition_sources": [],
+  "model_sources": [],
+  "docker_image": "gcr.io/kaggle-images/python@sha256:81b1e7c4b4f0f2a7e0a33943c95754b1b7af6b30d65221633a284b6b601cd84a",
+  "machine_shape": "None"
+}
