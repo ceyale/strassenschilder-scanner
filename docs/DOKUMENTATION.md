@@ -61,7 +61,7 @@ Die Farb- und Formerkennung liegt in `src/detector.js`; die OCR-Anbindung liegt 
 |---|---|---|
 | Farbstrenge | Regler in der Oberfläche (`minSaturation`) | Höher: weniger Fehltreffer, aber blasse Schilder fehlen. Niedriger: bei Dämmerung oder verblichenen Schildern. |
 | Farbmasken zeigen | Häkchen | Legt die erkannten Farbflächen über das Bild. Damit sieht man, warum ein Schild (nicht) erkannt wird. |
-| Farbstrenge | Regler | Startwert 0,38. Höher senkt Fehlalarme, niedriger nimmt blassere Flächen an. |
+| Farbstrenge | Regler | Startwert 0,40. Höher senkt Fehlalarme, niedriger nimmt blassere Flächen an. |
 | `WORK_W` | `src/app.js` | Analysebreite. Größer erkennt kleinere/entferntere Schilder, kostet Rechenzeit. |
 | `INTERVAL_MS` | `src/app.js` | Abstand zwischen zwei Analysen. |
 | `CONFIG` | `src/detector.js` | Mindestgrößen, Seitenverhältnis, Helligkeit. |

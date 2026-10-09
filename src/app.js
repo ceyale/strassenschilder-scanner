@@ -10,8 +10,8 @@
   const GTSRB_SPEED_CLASSES = new Map([[0, 20], [1, 30], [2, 50], [3, 60], [4, 70], [5, 80], [7, 100], [8, 120]]);
   const GTSRB_WARNING_CLASSES = new Set([11, ...Array.from({ length: 14 }, (_, i) => i + 18)]);
   // Lower thresholds accept more uncertain CNN predictions (and may add false positives).
-  const MIN_SIGN_CONFIDENCE = 0.22;
-  const MIN_SIGN_MARGIN = 0.05;
+  const MIN_SIGN_CONFIDENCE = 0.4;
+  const MIN_SIGN_MARGIN = 0.08;
   const $ = id => document.getElementById(id);
   const view = $('view'), ctx = view.getContext('2d');           // sichtbares Bild + Rahmen
   const backendUrlInput = $('backendUrl'), backendStatus = $('backendStatus');
@@ -192,7 +192,7 @@
         // Das Verkehrszeichen-CNN klassifiziert direkt den gesamten Kandidaten.
         const signSession = await getSignSession();
         const signClass = await classifyTrafficSign(signSession, signCrop);
-        if (signClass.index === 14 && signClass.confidence >= MIN_SIGN_CONFIDENCE && signClass.margin >= MIN_SIGN_MARGIN) {
+        if (signClass.index === 14 && signClass.confidence >= 0.6 && signClass.margin >= 0.15) {
           detection.label = 'stop';
           detection.cnnVerified = true;
           detection.stopVerified = true;
