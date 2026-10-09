@@ -316,7 +316,7 @@
           if (best) {
             best.matched = true; best.hits++; best.miss = 0;
             if (!best.cnnVerified && !best.textVerified) best.label = d.label;
-            for (const k of ['x', 'y', 'w', 'h']) best[k] = best[k] * 0.5 + d[k] * 0.5;   // Box glätten
+            for (const k of ['x', 'y', 'w', 'h']) best[k] = best[k] * 0.65 + d[k] * 0.35;   // stärker glätten gegen Kamerajittern
             best.conf = best.conf * 0.7 + d.conf * 0.3;
             if (d.state) best.state = d.state;
           } else tracks.push(Object.assign({ id: nextId++, hits: 1, miss: 0, matched: true }, d));

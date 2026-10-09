@@ -121,7 +121,10 @@
       if (detection.rejected || (CNN_SIGN_LABELS.has(detection.label) && !detection.cnnVerified) || (TEXT_SIGN_LABELS.has(detection.label) && !detection.textVerified)) continue;
       const sign = D.SIGNS[detection.label];
       if (!sign) continue;
-      const { x, y, w, h } = detection;
+      const marginX = detection.w * 0.06, marginY = detection.h * 0.06;
+      const x = Math.max(0, detection.x - marginX), y = Math.max(0, detection.y - marginY);
+      const w = Math.min(work.width - x, detection.w + marginX * 2);
+      const h = Math.min(work.height - y, detection.h + marginY * 2);
       const label = (detection.ocrText ? detection.ocrText + ' · ' : '') + sign.name + ' ' + Math.round(detection.conf * 100) + '%';
       const labelWidth = Math.min(work.width - x, previewCtx.measureText(label).width + markScale * 8);
       const labelY = y > markScale * 24 ? y - markScale * 24 : y + h;
@@ -176,7 +179,8 @@
       detection.ocrQueued = true;
       const sx = source.videoWidth || source.naturalWidth || source.width;
       const sy = source.videoHeight || source.naturalHeight || source.height;
-      const padX = detection.w * 0.1, padY = detection.h * 0.1;
+      // Keep a visible margin so the model also sees the sign border and context.
+      const padX = detection.w * 0.12, padY = detection.h * 0.12;
       const signX = Math.max(0, Math.floor((detection.x - padX) * sx / analysisW));
       const signY = Math.max(0, Math.floor((detection.y - padY) * sy / analysisH));
       const signRight = Math.min(sx, Math.ceil((detection.x + detection.w + padX) * sx / analysisW));
@@ -546,11 +550,15 @@
   /** Rahmen + Beschriftung; Koordinaten vom Analysebild auf die Anzeige hochrechnen. */
   function drawBoxes() {
     const k = view.width / work.width;
-    ctx.lineWidth = 3; ctx.textBaseline = 'top';
+    ctx.lineWidth = 4; ctx.textBaseline = 'top';
     ctx.font = '600 15px Bahnschrift, "DIN Alternate", system-ui, sans-serif';
     for (const t of current) {
       if (t.rejected || (CNN_SIGN_LABELS.has(t.label) && !t.cnnVerified) || (TEXT_SIGN_LABELS.has(t.label) && !t.textVerified)) continue;
-      const s = D.SIGNS[t.label], x = t.x * k, y = t.y * k, w = t.w * k, h = t.h * k;
+      const s = D.SIGNS[t.label], mx = t.w * 0.06, my = t.h * 0.06;
+      const left = Math.max(0, t.x - mx), top = Math.max(0, t.y - my);
+      const x = left * k, y = top * k;
+      const w = Math.min(work.width - left, t.w + mx * 2) * k;
+      const h = Math.min(work.height - top, t.h + my * 2) * k;
       const txt = (t.ocrText ? t.ocrText + ' · ' : '') + (t.state ? t.state + ' · ' : '') + s.name + ' ' + Math.round(t.conf * 100) + ' %', tw = Math.min(view.width - x, ctx.measureText(txt).width + 10);
       const ty = y > 22 ? y - 22 : y + h + 2;
       ctx.strokeStyle = s.hex; ctx.strokeRect(x, y, w, h);
