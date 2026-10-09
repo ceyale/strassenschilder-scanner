@@ -5,6 +5,10 @@
 (function () {
   'use strict';
   const D = SignDetector;
+  const CNN_SIGN_LABELS = new Set(['stop', 'verbot', 'einfahrtVerboten', 'vorfahrtGewaehren', 'warnung', 'gebot', 'vorfahrtstrasse']);
+  const TEXT_SIGN_LABELS = new Set(['hinweis', 'ortstafel']);
+  const GTSRB_SPEED_CLASSES = new Map([[0, 20], [1, 30], [2, 50], [3, 60], [4, 70], [5, 80], [7, 100], [8, 120]]);
+  const GTSRB_WARNING_CLASSES = new Set([11, ...Array.from({ length: 14 }, (_, i) => i + 18)]);
   const $ = id => document.getElementById(id);
   const view = $('view'), ctx = view.getContext('2d');           // sichtbares Bild + Rahmen
   const work = document.createElement('canvas');                  // kleines Bild für die Analyse
@@ -13,25 +17,12 @@
   const video = $('video'), list = $('list'), statusEl = $('status');
 
   const VIEW_W = 640;       // Breite der Anzeige
-  const WORK_W = 400;       // mehr Details für kleine Schilder und deren Schrift
-  const INTERVAL_MS = 80;   // begrenzt die Zusatzlast der größeren Analysebilder
+  const WORK_W = 640;       // hohe Analyseauflösung für kleine und entfernte Schilder
+  const INTERVAL_MS = 100;  // Rechenzeit für die größere Analysefläche einplanen
 
-  // Kleines MNIST-CNN; die 25 KB Gewichte werden erst bei einem Tempolimit geladen.
-  let digitSessionPromise = null, characterSessionPromise = null;
-  let digitQueue = Promise.resolve(), characterQueue = Promise.resolve();
-  function getDigitSession() {
-    if (!window.ort) return Promise.reject(new Error('ONNX Runtime Web nicht verfügbar'));
-    if (!digitSessionPromise) {
-      window.ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/';
-      digitSessionPromise = window.ort.InferenceSession.create('models/mnist-12.onnx', {
-        executionProviders: ['wasm'], graphOptimizationLevel: 'all'
-      }).catch(error => {
-        digitSessionPromise = null;
-        throw error;
-      });
-    }
-    return digitSessionPromise;
-  }
+  // Das GTSRB-CNN liefert bei Tempolimits direkt die passende Zahl als Klasse.
+  let characterSessionPromise = null, signSessionPromise = null;
+  let signQueue = Promise.resolve(), characterQueue = Promise.resolve();
   function getCharacterSession() {
     if (!window.ort) return Promise.reject(new Error('ONNX Runtime Web nicht verfügbar'));
     if (!characterSessionPromise) {
@@ -45,6 +36,19 @@
     }
     return characterSessionPromise;
   }
+  function getSignSession() {
+    if (!window.ort) return Promise.reject(new Error('ONNX Runtime Web nicht verfügbar'));
+    if (!signSessionPromise) {
+      window.ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/';
+      signSessionPromise = window.ort.InferenceSession.create('models/gtsrb-sign-cnn.onnx', {
+        executionProviders: ['wasm'], graphOptimizationLevel: 'all'
+      }).catch(error => {
+        signSessionPromise = null;
+        throw error;
+      });
+    }
+    return signSessionPromise;
+  }
   let textWorkerPromise = null, textQueue = Promise.resolve();
   function getTextWorker() {
     if (!window.Tesseract) return Promise.reject(new Error('Texterkennung nicht verfügbar'));
@@ -56,7 +60,7 @@
   }
 
   let stream = null, running = false, still = null, lastRun = 0, lastKey = '', dims = '';
-  let tracker = D.createTracker(), current = [], mask = null;
+  let tracker = D.createTracker(4, 2), current = [], mask = null;
 
   /** Canvas-Größen an die Bildquelle anpassen (Seitenverhältnis beibehalten). */
   function setSize(sw, sh) {
@@ -85,7 +89,7 @@
     draw();
   }
 
-  /** Ziffern in der weißen Innenfläche eines runden Tempolimits mit einem CNN lesen. */
+  /** Schildkandidaten mit dem GTSRB-CNN klassifizieren; Speedklassen liefern direkt den Zahlenwert. */
   function queueOcr(source, detections, analysisW, analysisH) {
     for (const detection of detections) {
       if (detection.ocrQueued || detection.ocrText || detection.ocrFailed) continue;
@@ -93,54 +97,158 @@
         queueSignText(source, detection, analysisW, analysisH);
         continue;
       }
-      if (detection.label !== 'verbot') continue;
+      // Jede rote Formheuristik bleibt zunächst unsichtbar, bis das CNN den
+      // Kandidaten einer passenden GTSRB-Klasse zugeordnet hat.
+      if (!CNN_SIGN_LABELS.has(detection.label)) continue;
       detection.ocrQueued = true;
       const sx = source.videoWidth || source.naturalWidth || source.width;
       const sy = source.videoHeight || source.naturalHeight || source.height;
-      // Nur die innere Fläche ausschneiden; der rote Ring und der Bildrand
-      // dürfen keine zusätzlichen Ziffern-Komponenten erzeugen.
-      const insetX = detection.w * 0.16, insetY = detection.h * 0.16;
-      const x = Math.max(0, Math.floor((detection.x + insetX) * sx / analysisW));
-      const y = Math.max(0, Math.floor((detection.y + insetY) * sy / analysisH));
-      const right = Math.min(sx, Math.ceil((detection.x + detection.w - insetX) * sx / analysisW));
-      const bottom = Math.min(sy, Math.ceil((detection.y + detection.h - insetY) * sy / analysisH));
-      const crop = document.createElement('canvas');
-      crop.width = Math.max(1, (right - x) * 3);
-      crop.height = Math.max(1, (bottom - y) * 3);
-      const cctx = crop.getContext('2d', { willReadFrequently: true });
-      cctx.imageSmoothingEnabled = true;
-      cctx.drawImage(source, x, y, right - x, bottom - y, 0, 0, crop.width, crop.height);
-      const pixels = cctx.getImageData(0, 0, crop.width, crop.height);
-      const grayValues = new Uint8Array(crop.width * crop.height), histogram = new Uint32Array(256);
-      for (let i = 0, p = 0; i < pixels.data.length; i += 4, p++) {
-        const red = pixels.data[i], green = pixels.data[i + 1], blue = pixels.data[i + 2];
-        const isRed = red > green * 1.16 && red > blue * 1.16 && red - Math.min(green, blue) > 24;
-        const gray = Math.round(red * 0.299 + green * 0.587 + blue * 0.114);
-        grayValues[p] = isRed ? 255 : gray;
-        if (!isRed) histogram[gray]++;
-      }
-      const threshold = otsuThreshold(histogram);
-      for (let i = 0, p = 0; i < pixels.data.length; i += 4, p++) {
-        const value = grayValues[p] < threshold ? 0 : 255;
-        pixels.data[i] = pixels.data[i + 1] = pixels.data[i + 2] = value;
-      }
-      cctx.putImageData(pixels, 0, 0);
-
-      digitQueue = digitQueue.then(async () => {
-        const session = await getDigitSession();
-        const chars = segmentDigits(pixels, crop.width, crop.height);
-        let digits = '';
-        for (const char of chars) digits += await classifyDigit(session, char);
-        detection.ocrText = digits ? digits + ' km/h' : '';
+      const padX = detection.w * 0.1, padY = detection.h * 0.1;
+      const signX = Math.max(0, Math.floor((detection.x - padX) * sx / analysisW));
+      const signY = Math.max(0, Math.floor((detection.y - padY) * sy / analysisH));
+      const signRight = Math.min(sx, Math.ceil((detection.x + detection.w + padX) * sx / analysisW));
+      const signBottom = Math.min(sy, Math.ceil((detection.y + detection.h + padY) * sy / analysisH));
+      const signCrop = document.createElement('canvas');
+      signCrop.width = signCrop.height = 96;
+      signCrop.getContext('2d').drawImage(source, signX, signY, signRight - signX, signBottom - signY, 0, 0, 96, 96);
+      signQueue = signQueue.then(async () => {
+        // Das Verkehrszeichen-CNN klassifiziert direkt den gesamten Kandidaten.
+        const signSession = await getSignSession();
+        const signClass = await classifyTrafficSign(signSession, signCrop);
+        if (signClass.index === 14 && signClass.confidence >= 0.82 && signClass.margin >= 0.3) {
+          detection.label = 'stop';
+          detection.cnnVerified = true;
+          detection.stopVerified = true;
+          detection.ocrText = 'STOP';
+          detection.cnnText = 'STOP';
+          renderList();
+          refreshStill();
+          return;
+        }
+        if (signClass.index === 17 && signClass.confidence >= 0.82 && signClass.margin >= 0.3) {
+          detection.label = 'einfahrtVerboten';
+          detection.cnnVerified = true;
+          renderList();
+          refreshStill();
+          return;
+        }
+        if (signClass.index === 13 && signClass.confidence >= 0.78 && signClass.margin >= 0.28) {
+          detection.label = 'vorfahrtGewaehren';
+          detection.cnnVerified = true;
+          renderList();
+          refreshStill();
+          return;
+        }
+        if (GTSRB_WARNING_CLASSES.has(signClass.index) && signClass.confidence >= 0.78 && signClass.margin >= 0.28) {
+          detection.label = 'warnung';
+          detection.cnnVerified = true;
+          renderList();
+          refreshStill();
+          return;
+        }
+        if (signClass.index === 12 && signClass.confidence >= 0.82 && signClass.margin >= 0.3) {
+          detection.label = 'vorfahrtstrasse';
+          detection.cnnVerified = true;
+          renderList();
+          refreshStill();
+          return;
+        }
+        if (signClass.index >= 33 && signClass.index <= 40 && signClass.confidence >= 0.82 && signClass.margin >= 0.3) {
+          detection.label = 'gebot';
+          detection.cnnVerified = true;
+          renderList();
+          refreshStill();
+          return;
+        }
+        const expectedSpeed = GTSRB_SPEED_CLASSES.get(signClass.index);
+        if (!expectedSpeed || signClass.confidence < 0.55 || signClass.margin < 0.12) {
+          detection.rejected = true;
+          renderList();
+          refreshStill();
+          return;
+        }
+        detection.label = 'verbot';
+        detection.cnnVerified = true;
+        detection.cnnText = expectedSpeed + ' km/h';
+        detection.ocrText = detection.cnnText;
         renderList();
         refreshStill();
       }).catch(() => {
-        detection.ocrText = '';
+        detection.cnnText = '';
+        detection.rejected = true;
         detection.ocrFailed = true;
         renderList();
         refreshStill();
       });
     }
+  }
+
+  /** Verkehrszeichen-CNN klassifiziert den gesamten roten Kandidaten statt Glyphen. */
+  async function classifyTrafficSign(session, signCrop) {
+    const size = 32, input = new Float32Array(3 * size * size);
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = size;
+    const c = canvas.getContext('2d', { willReadFrequently: true });
+    c.imageSmoothingEnabled = true;
+    c.drawImage(signCrop, 0, 0, size, size);
+    const pixels = claheLuminance(c.getImageData(0, 0, size, size).data, size);
+    const mean = [0.41359345, 0.38223032, 0.39460091];
+    const std = [0.27057118, 0.26105214, 0.26897097];
+    for (let i = 0; i < size * size; i++) {
+      input[i] = (pixels[i * 4] / 255 - mean[0]) / std[0];
+      input[size * size + i] = (pixels[i * 4 + 1] / 255 - mean[1]) / std[1];
+      input[2 * size * size + i] = (pixels[i * 4 + 2] / 255 - mean[2]) / std[2];
+    }
+    const tensor = new window.ort.Tensor('float32', input, [1, 3, size, size]);
+    const result = await session.run({ [session.inputNames[0]]: tensor });
+    const logits = result[session.outputNames[0]].data;
+    let max = -Infinity, index = -1, second = -Infinity, secondIndex = -1;
+    for (let i = 0; i < logits.length; i++) {
+      if (logits[i] > max) { second = max; secondIndex = index; max = logits[i]; index = i; }
+      else if (logits[i] > second) { second = logits[i]; secondIndex = i; }
+    }
+    const exps = Array.from(logits, value => Math.exp(value - max));
+    const sum = exps.reduce((a, b) => a + b, 0);
+    return { index, confidence: exps[index] / Math.max(sum, 1e-12), margin: (exps[index] - exps[secondIndex]) / Math.max(sum, 1e-12) };
+  }
+
+  /** CLAHE-Näherung auf 4×4 Helligkeits-Kacheln, passend zur CNN-Vorverarbeitung. */
+  function claheLuminance(source, size) {
+    const tiles = 4, tileSize = size / tiles, area = tileSize * tileSize;
+    const luma = new Uint8Array(size * size), luts = [];
+    for (let i = 0; i < luma.length; i++) {
+      const r = source[i * 4], g = source[i * 4 + 1], b = source[i * 4 + 2];
+      luma[i] = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+    }
+    const clipLimit = Math.max(1, Math.floor(2 * area / 256));
+    for (let ty = 0; ty < tiles; ty++) for (let tx = 0; tx < tiles; tx++) {
+      const hist = new Uint32Array(256);
+      for (let y = ty * tileSize; y < (ty + 1) * tileSize; y++) for (let x = tx * tileSize; x < (tx + 1) * tileSize; x++) hist[luma[y * size + x]]++;
+      let excess = 0;
+      for (let i = 0; i < 256; i++) if (hist[i] > clipLimit) { excess += hist[i] - clipLimit; hist[i] = clipLimit; }
+      const batch = Math.floor(excess / 256), residual = excess - batch * 256;
+      for (let i = 0; i < 256; i++) hist[i] += batch;
+      const step = residual ? Math.max(1, Math.floor(256 / residual)) : 256;
+      for (let i = 0; i < 256 && i / step < residual; i += step) hist[i]++;
+      const lut = new Uint8Array(256); let cumulative = 0;
+      for (let i = 0; i < 256; i++) { cumulative += hist[i]; lut[i] = Math.max(0, Math.min(255, Math.round(cumulative * 255 / area))); }
+      luts.push(lut);
+    }
+    const out = new Uint8ClampedArray(source.length);
+    for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+      const fx = x / tileSize - 0.5, fy = y / tileSize - 0.5;
+      const xr = Math.floor(fx), yr = Math.floor(fy), ax = fx - xr, ay = fy - yr;
+      const x0 = Math.max(0, Math.min(tiles - 1, xr)), x1 = Math.max(0, Math.min(tiles - 1, xr + 1));
+      const y0 = Math.max(0, Math.min(tiles - 1, yr)), y1 = Math.max(0, Math.min(tiles - 1, yr + 1));
+      const value = luma[y * size + x];
+      const top = luts[y0 * tiles + x0][value] * (1 - ax) + luts[y0 * tiles + x1][value] * ax;
+      const bottom = luts[y1 * tiles + x0][value] * (1 - ax) + luts[y1 * tiles + x1][value] * ax;
+      const equalized = top * (1 - ay) + bottom * ay, ratio = value > 2 ? equalized / value : 1;
+      const i = (y * size + x) * 4;
+      out[i] = Math.min(255, source[i] * ratio); out[i + 1] = Math.min(255, source[i + 1] * ratio);
+      out[i + 2] = Math.min(255, source[i + 2] * ratio); out[i + 3] = 255;
+    }
+    return out;
   }
 
   /** Ganze Schrift auf rechteckigen Hinweisschildern und Ortstafeln per OCR lesen. */
@@ -199,15 +307,21 @@
     // Full-word OCR bleibt als Ergänzung für Umlaute und unklare Segmentierung.
     textQueue = textQueue.then(async () => {
       const worker = await getTextWorker();
-      await worker.setParameters({ preserve_interword_spaces: '1' });
+      await worker.setParameters({
+        preserve_interword_spaces: '1', tessedit_char_whitelist: '',
+        tessedit_pageseg_mode: '3', classify_bln_numeric_mode: '0'
+      });
       const { data } = await worker.recognize(crop);
-      const confidentWords = (data.words || []).filter(word => word.confidence >= 35).map(word => word.text);
-      const text = confidentWords.length ? confidentWords.join(' ') : (data.text || '');
+      const confidentWords = (data.words || []).filter(word => word.confidence >= 35);
+      const text = confidentWords.length ? confidentWords.map(word => word.text).join(' ') : (data.text || '');
       detection.ocrText = text.replace(/[^\p{L}\p{N}\s.,'’/-]/gu, ' ').replace(/\s+/g, ' ').trim();
+      detection.textVerified = confidentWords.some(word => word.confidence >= 60 && /[\p{L}\p{N}]{3,}/u.test(word.text));
+      if (!detection.textVerified) detection.rejected = true;
       renderList();
       refreshStill();
     }).catch(() => {
       detection.ocrFailed = true;
+      detection.rejected = true;
       renderList();
       refreshStill();
     });
@@ -289,72 +403,10 @@
     return '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'[best];
   }
 
-  /** Verbundene dunkle Ziffernformen im kontrastverstärkten Ausschnitt segmentieren. */
-  function segmentDigits(image, width, height) {
-    const binary = new Uint8Array(width * height), seen = new Uint8Array(width * height);
-    for (let p = 0, i = 0; i < binary.length; i++, p += 4) binary[i] = image.data[p] < 128 ? 1 : 0;
-    const queue = new Int32Array(binary.length), parts = [];
-    for (let start = 0; start < binary.length; start++) {
-      if (!binary[start] || seen[start]) continue;
-      let head = 0, tail = 0, x0 = width, x1 = 0, y0 = height, y1 = 0;
-      queue[tail++] = start; seen[start] = 1;
-      while (head < tail) {
-        const p = queue[head++], x = p % width, y = (p / width) | 0;
-        x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y);
-        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
-          const nx = x + dx, ny = y + dy;
-          if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
-          const next = ny * width + nx;
-          if (binary[next] && !seen[next]) { seen[next] = 1; queue[tail++] = next; }
-        }
-      }
-      const w = x1 - x0 + 1, h = y1 - y0 + 1;
-      const centered = x0 > width * 0.04 && x1 < width * 0.96 && y0 > height * 0.08 && y1 < height * 0.94;
-      if (centered && h >= height * 0.18 && w >= width * 0.025 && tail >= width * height * 0.0015) {
-        parts.push({ x: x0, y: y0, w, h, area: tail });
-      }
-    }
-    // Small flecks are filtered above; favor the three sign glyphs if texture remains.
-    const tallest = Math.max(0, ...parts.map(part => part.h));
-    return parts.filter(part => part.h >= tallest * 0.55).sort((a, b) => a.x - b.x).slice(0, 3).map(part => ({ image, width, part }));
-  }
-
-  /** Ein segmentiertes Zeichen MNIST-konform auf 28×28 bringen und per ONNX-CNN klassifizieren. */
-  async function classifyDigit(session, char) {
-    const { image, width, part } = char;
-    const scale = Math.min(20 / part.w, 20 / part.h);
-    const drawW = Math.max(1, Math.round(part.w * scale)), drawH = Math.max(1, Math.round(part.h * scale));
-    const left = Math.round((28 - drawW) / 2), top = Math.round((28 - drawH) / 2);
-    const glyph = new Float32Array(28 * 28);
-    for (let y = 0; y < drawH; y++) for (let x = 0; x < drawW; x++) {
-      const sx = part.x + Math.min(part.w - 1, Math.floor((x + 0.5) * part.w / drawW));
-      const sy = part.y + Math.min(part.h - 1, Math.floor((y + 0.5) * part.h / drawH));
-      if (image.data[(sy * width + sx) * 4] < 128) glyph[(top + y) * 28 + left + x] = 1;
-    }
-    // MNIST-Zeichen anhand des Tinten-Schwerpunkts, nicht nur am Rahmen zentrieren.
-    let mass = 0, sumX = 0, sumY = 0;
-    for (let y = 0; y < 28; y++) for (let x = 0; x < 28; x++) {
-      const ink = glyph[y * 28 + x]; mass += ink; sumX += x * ink; sumY += y * ink;
-    }
-    const shiftX = mass ? Math.round(13.5 - sumX / mass) : 0;
-    const shiftY = mass ? Math.round(13.5 - sumY / mass) : 0;
-    const input = new Float32Array(28 * 28);
-    for (let y = 0; y < 28; y++) for (let x = 0; x < 28; x++) {
-      const dx = x + shiftX, dy = y + shiftY;
-      if (dx >= 0 && dx < 28 && dy >= 0 && dy < 28) input[dy * 28 + dx] = glyph[y * 28 + x];
-    }
-    const tensor = new window.ort.Tensor('float32', input, [1, 1, 28, 28]);
-    const result = await session.run({ [session.inputNames[0]]: tensor });
-    const scores = result[session.outputNames[0]].data;
-    let best = 0;
-    for (let i = 1; i < 10; i++) if (scores[i] > scores[best]) best = i;
-    return String(best);
-  }
-
-  /** Liste unter dem Bild – nur neu aufbauen, wenn sich die Schildtypen ändern. */
   function renderList() {
-    const labels = [...new Set(current.map(t => t.label))];
-    const key = labels.map(l => l + ':' + current.filter(t => t.label === l)
+    const shown = current.filter(t => !t.rejected && (!CNN_SIGN_LABELS.has(t.label) || t.cnnVerified) && (!TEXT_SIGN_LABELS.has(t.label) || t.textVerified));
+    const labels = [...new Set(shown.map(t => t.label))];
+    const key = labels.map(l => l + ':' + shown.filter(t => t.label === l)
       .map(t => [t.ocrText || '', t.cnnText || '', t.state || '', t.ocrFailed || '', t.cnnFailed || ''].join('/')).join('|')).join();
     if (key === lastKey) return;
     lastKey = key;
@@ -374,29 +426,29 @@
       number.textContent = sign.zeichen;
       note.textContent = sign.note;
       li.append(title, number, note);
-      const texts = [...new Set(current.filter(t => t.label === label).map(t => t.ocrText).filter(Boolean))];
+      const texts = [...new Set(shown.filter(t => t.label === label).map(t => t.ocrText).filter(Boolean))];
       if (texts.length) {
         const read = document.createElement('p');
         read.className = 'ocr-text';
         read.textContent = 'Gelesener Text: ' + texts.join(' · ');
         li.append(read);
-      } else if (current.some(t => t.label === label && t.ocrFailed)) {
+      } else if (shown.some(t => t.label === label && t.ocrFailed)) {
         const failed = document.createElement('p');
         failed.textContent = 'Texterkennung konnte nicht geladen werden.';
         li.append(failed);
       }
-      const cnnTexts = [...new Set(current.filter(t => t.label === label).map(t => t.cnnText).filter(Boolean))];
+      const cnnTexts = [...new Set(shown.filter(t => t.label === label).map(t => t.cnnText).filter(Boolean))];
       if (cnnTexts.length && (!texts.length || cnnTexts.some(text => !texts.includes(text)))) {
         const cnn = document.createElement('p');
         cnn.className = 'cnn-text';
-        cnn.textContent = 'CNN-Zeichen: ' + cnnTexts.join(' · ');
+        cnn.textContent = label === 'verbot' ? 'CNN-Zahl: ' + cnnTexts.join(' · ') : 'CNN-Zeichen: ' + cnnTexts.join(' · ');
         li.append(cnn);
-      } else if (current.some(t => t.label === label && t.cnnFailed)) {
+      } else if (shown.some(t => t.label === label && t.cnnFailed)) {
         const failed = document.createElement('p');
         failed.textContent = 'Zeichen-CNN konnte nicht geladen werden.';
         li.append(failed);
       }
-      const lightStates = [...new Set(current.filter(t => t.label === label).map(t => t.state).filter(Boolean))];
+      const lightStates = [...new Set(shown.filter(t => t.label === label).map(t => t.state).filter(Boolean))];
       if (lightStates.length) {
         const state = document.createElement('p');
         state.textContent = 'Hellstes Lichtfeld: ' + lightStates.join(', ');
@@ -423,6 +475,7 @@
     ctx.lineWidth = 3; ctx.textBaseline = 'top';
     ctx.font = '600 15px Bahnschrift, "DIN Alternate", system-ui, sans-serif';
     for (const t of current) {
+      if (t.rejected || (CNN_SIGN_LABELS.has(t.label) && !t.cnnVerified) || (TEXT_SIGN_LABELS.has(t.label) && !t.textVerified)) continue;
       const s = D.SIGNS[t.label], x = t.x * k, y = t.y * k, w = t.w * k, h = t.h * k;
       const txt = (t.ocrText ? t.ocrText + ' · ' : '') + (t.state ? t.state + ' · ' : '') + s.name + ' ' + Math.round(t.conf * 100) + ' %', tw = Math.min(view.width - x, ctx.measureText(txt).width + 10);
       const ty = y > 22 ? y - 22 : y + h + 2;
@@ -452,12 +505,12 @@
       return;
     }
     // Modell und WASM parallel zur Kameraberechtigung laden, damit die erste
-    // erkannte Tempolimit-Zahl nicht auf den Kaltstart warten muss.
-    getDigitSession().catch(() => {});
+    // Schilderkennung nicht auf den Kaltstart warten muss.
     getCharacterSession().catch(() => {});
+    getSignSession().catch(() => {});
     try {
       stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 } }, audio: false });
+        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false });
       video.srcObject = stream; await video.play();
       still = null; tracker = D.createTracker(4, 2); running = true;
       $('camBtn').textContent = 'Kamera stoppen';

@@ -27,7 +27,7 @@
 
   /** Katalog der erkennbaren Schilder (Zeichen-Nummern nach StVO). */
   const SIGNS = {
-    stop:              { name: 'Stopp',             zeichen: 'Z 206',     hex: '#d3232f', text: '#fff',    note: 'Roter Achtkant: Halt! Vorfahrt gewähren.' },
+    stop:              { name: 'Stopp',             zeichen: 'Z 206',     hex: '#d3232f', text: '#fff',    note: 'STOP im Schildinneren per CNN erkannt.' },
     vorfahrtGewaehren: { name: 'Vorfahrt gewähren', zeichen: 'Z 205',     hex: '#d3232f', text: '#fff',    note: 'Rotes Dreieck mit der Spitze nach unten.' },
     warnung:           { name: 'Gefahrzeichen',     zeichen: 'Z 101 ff.', hex: '#d3232f', text: '#fff',    note: 'Rotes Dreieck, Spitze oben. Das Symbol im Inneren wird nicht gelesen.' },
     verbot:            { name: 'Tempolimit / Verbot', zeichen: 'Z 274 ff.', hex: '#d3232f', text: '#fff',    note: 'Die Ziffer im roten Ring wird automatisch gelesen.' },
@@ -99,7 +99,7 @@
   /**
    * Schritt 3: Silhouette vermessen. Pro Zeile zählt nur der äußerste linke und rechte
    * Pixel – so werden Ringe (rote Ränder) zur gefüllten Form.
-   *   solidity = Silhouettenfläche / Rahmenfläche   (Kreis .785, Dreieck/Raute .5, Achteck .83, Rechteck 1)
+   *   solidity = Silhouettenfläche / Rahmenfläche   (Kreis .785, Dreieck/Raute .5, Rechteck 1)
    *   fill     = echte Farbpixel / Silhouettenfläche (Ring niedrig, Vollfläche hoch)
    *   wTop/wBot = mittlere Breite im oberen/unteren Viertel relativ zur Rahmenbreite
    */
@@ -128,19 +128,13 @@
       return s.wTop < s.wBot ? 'triangleUp' : 'triangleDown';
     }
     if (s.solidity > 0.92) return 'rect';
-    if (aspect > 0.8 && aspect < 1.25) {                       // rund oder achteckig
-      return (s.wTop > 0.64 && s.solidity > 0.8 && s.fill > 0.6) ? 'octagon' : 'circle';
-    }
+    if (aspect > 0.78 && aspect < 1.28 && s.solidity > 0.67) return 'circle';
     return null;
   }
 
   /** Schritt 4b: Farbe + Form → Schildtyp (oder null). */
   function labelOf(color, shape, fill, stats) {
     if (color === RED) {
-      if (shape === 'octagon') return 'stop';
-      // Stopp-Achtecke bleiben mit breiten oberen und unteren Kanten erkennbar,
-      // auch wenn Schrift, Unschärfe oder Perspektive die Füllung/Solidity senken.
-      if (shape === 'circle' && stats.wTop > 0.64 && stats.wBot > 0.64 && stats.solidity > 0.76 && stats.fill > 0.4) return 'stop';
       if (shape === 'triangleDown') return 'vorfahrtGewaehren';
       if (shape === 'triangleUp') return 'warnung';
       if (shape === 'circle') return fill > 0.65 ? 'einfahrtVerboten' : 'verbot';
@@ -158,7 +152,7 @@
   function signEvidence(data, mask, imageW, comp, shape) {
     const aspect = comp.w / comp.h;
     const shapeRanges = {
-      circle: [0.7, 1.4, 0.67, 0.91], octagon: [0.78, 1.28, 0.69, 0.92],
+      circle: [0.7, 1.4, 0.67, 0.91],
       triangleUp: [0.7, 1.4, 0.34, 0.67], triangleDown: [0.7, 1.4, 0.34, 0.67],
       diamond: [0.7, 1.4, 0.34, 0.67], rect: [0.85, 4.5, 0.82, 1.02]
     }[shape];
@@ -171,7 +165,6 @@
       const nx = (x - comp.x + 0.5) / comp.w, ny = (y - comp.y + 0.5) / comp.h;
       let inside = false;
       if (shape === 'circle') inside = ((nx - 0.5) / 0.5) ** 2 + ((ny - 0.5) / 0.5) ** 2 <= 1;
-      else if (shape === 'octagon') inside = Math.abs(nx - 0.5) <= 0.5 && Math.abs(ny - 0.5) <= 0.5 && Math.abs(nx - 0.5) + Math.abs(ny - 0.5) <= 0.72;
       else if (shape === 'triangleUp') inside = ny >= Math.abs(nx - 0.5) * 2;
       else if (shape === 'triangleDown') inside = 1 - ny >= Math.abs(nx - 0.5) * 2;
       else if (shape === 'diamond') inside = Math.abs(nx - 0.5) + Math.abs(ny - 0.5) <= 0.5;
@@ -206,14 +199,14 @@
         }
         if (found) covered++;
       }
-      if (covered < 12) return null;
+      if (covered < 13) return null;
     }
     const shapeConf = confidence(shape, stats.solidity);
     return shapeConf * 0.72 + Math.min(1, colorShare * 1.5) * 0.18 + Math.min(1, neutralShare * 2) * 0.1;
   }
 
   /** Sicherheit 0..1: wie nah liegt die gemessene Füllung am Idealwert der Form? */
-  const IDEAL = { circle: 0.785, octagon: 0.828, triangleUp: 0.5, triangleDown: 0.5, diamond: 0.5, rect: 1 };
+  const IDEAL = { circle: 0.785, triangleUp: 0.5, triangleDown: 0.5, diamond: 0.5, rect: 1 };
   const confidence = (shape, solidity) => Math.max(0, Math.min(1, 1 - Math.abs(solidity - IDEAL[shape]) * 3));
 
   /** Ein Bild analysieren. `data` ist RGBA (ImageData.data). */
@@ -305,6 +298,7 @@
     return inter / (a.w * a.h + b.w * b.h - inter);
   }
 
+  const CNN_CANDIDATE_LABELS = new Set(['stop', 'verbot', 'einfahrtVerboten', 'vorfahrtGewaehren', 'warnung', 'gebot', 'vorfahrtstrasse']);
   function createTracker(minHits = 3, maxMiss = 3) {
     let tracks = [], nextId = 1;
     return {
@@ -313,12 +307,15 @@
         for (const d of dets) {
           let best = null, bestIou = 0.25;
           for (const t of tracks) {
-            if (t.matched || t.label !== d.label) continue;
+            const sameCnnCandidate = CNN_CANDIDATE_LABELS.has(t.label) && CNN_CANDIDATE_LABELS.has(d.label);
+            const sameTextCandidate = ['hinweis', 'ortstafel'].includes(t.label) && ['hinweis', 'ortstafel'].includes(d.label);
+            if (t.matched || (t.label !== d.label && !sameCnnCandidate && !sameTextCandidate)) continue;
             const o = iou(t, d);
             if (o > bestIou) { bestIou = o; best = t; }
           }
           if (best) {
             best.matched = true; best.hits++; best.miss = 0;
+            if (!best.cnnVerified && !best.textVerified) best.label = d.label;
             for (const k of ['x', 'y', 'w', 'h']) best[k] = best[k] * 0.5 + d[k] * 0.5;   // Box glätten
             best.conf = best.conf * 0.7 + d.conf * 0.3;
             if (d.state) best.state = d.state;
