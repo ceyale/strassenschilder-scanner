@@ -15,6 +15,12 @@
   const $ = id => document.getElementById(id);
   const view = $('view'), ctx = view.getContext('2d');           // sichtbares Bild + Rahmen
   const backendUrlInput = $('backendUrl'), backendStatus = $('backendStatus');
+  const boxHeadGate = $('boxHeadGate');
+  const boxHeadThreshold = $('boxHeadThreshold');
+  const boxHeadThresholdOut = $('boxHeadThresholdOut');
+  const binaryGate = $('binaryGate');
+  const binaryConfidence = $('binaryConfidence');
+  const binaryConfidenceOut = $('binaryConfidenceOut');
   const work = document.createElement('canvas');                  // kleines Bild für die Analyse
   const wctx = work.getContext('2d', { willReadFrequently: true });
   const maskCv = document.createElement('canvas');                // Farbmasken-Ansicht (Debug)
@@ -25,8 +31,16 @@
   const INTERVAL_MS = 100;  // Rechenzeit für die größere Analysefläche einplanen
 
   // Das GTSRB-CNN liefert bei Tempolimits direkt die passende Zahl als Klasse.
-  let characterSessionPromise = null, signSessionPromise = null;
-  let signQueue = Promise.resolve(), characterQueue = Promise.resolve();
+  let characterSessionPromise = null, signSessionPromise = null, binarySessionPromise = null, boxHeadPromise = null;
+  boxHeadGate.checked = localStorage.getItem('signScannerLearnableBoxHeadMode') === 'on';
+  const savedBoxHeadThreshold = Number(localStorage.getItem('signScannerLearnableBoxThreshold'));
+  if (Number.isFinite(savedBoxHeadThreshold) && savedBoxHeadThreshold >= 0.10 && savedBoxHeadThreshold <= 0.90) boxHeadThreshold.value = String(savedBoxHeadThreshold);
+  boxHeadThresholdOut.value = Number(boxHeadThreshold.value).toFixed(2);
+  binaryGate.checked = localStorage.getItem('signScannerBinaryGate') !== 'off';
+  const savedBinaryConfidence = Number(localStorage.getItem('signScannerBinaryConfidence'));
+  if (Number.isFinite(savedBinaryConfidence) && savedBinaryConfidence >= 0.05 && savedBinaryConfidence <= 0.8) binaryConfidence.value = String(savedBinaryConfidence);
+  binaryConfidenceOut.value = Number(binaryConfidence.value).toFixed(2);
+  let signQueue = Promise.resolve(), binaryQueue = Promise.resolve(), characterQueue = Promise.resolve();
   function getCharacterSession() {
     if (!window.ort) return Promise.reject(new Error('ONNX Runtime Web nicht verfügbar'));
     if (!characterSessionPromise) {
@@ -53,6 +67,20 @@
     }
     return signSessionPromise;
   }
+  function getLearnableBoxHead() {
+    if (!boxHeadPromise) boxHeadPromise = fetch('models/learnable-box-head.json').then(r => { if (!r.ok) throw new Error('Lernbarer Box-Kopf nicht verfügbar'); return r.json(); }).catch(error => { boxHeadPromise = null; throw error; });
+    return boxHeadPromise;
+  }
+  function getBinarySession() {
+    if (!window.ort) return Promise.reject(new Error('ONNX Runtime Web nicht verfügbar'));
+    if (!binarySessionPromise) {
+      window.ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/';
+      binarySessionPromise = window.ort.InferenceSession.create('models/sign-binary-32.onnx', {
+        executionProviders: ['wasm'], graphOptimizationLevel: 'all'
+      }).catch(error => { binarySessionPromise = null; throw error; });
+    }
+    return binarySessionPromise;
+  }
   let textWorkerPromise = null, textQueue = Promise.resolve();
   function getTextWorker() {
     if (!window.Tesseract) return Promise.reject(new Error('Texterkennung nicht verfügbar'));
@@ -63,7 +91,7 @@
     return textWorkerPromise;
   }
 
-  let stream = null, running = false, still = null, lastRun = 0, lastKey = '', dims = '';
+  let stream = null, running = false, still = null, lastRun = 0, lastKey = '', dims = '', analysisInProgress = false;
   let tracker = D.createTracker(4, 2), current = [], mask = null;
   let lastBackendKey = '', backendRetryAt = 0, lastBackendSentAt = 0;
 
@@ -76,7 +104,7 @@
 
   /** Send only confirmed, currently visible signs to the configured PC service. */
   function publishBackendSnapshot() {
-    const signs = current.filter(t => !t.rejected && (!CNN_SIGN_LABELS.has(t.label) || t.cnnVerified) && (!TEXT_SIGN_LABELS.has(t.label) || t.textVerified));
+    const signs = current.filter(t => !t.rejected && (!CNN_SIGN_LABELS.has(t.label) || t.cnnVerified || t.legacyHeuristic));
     const items = signs.map(t => ({
       label: t.label,
       name: D.SIGNS[t.label].name,
@@ -118,7 +146,7 @@
     previewCtx.font = `600 ${Math.max(12, Math.round(work.width / 48))}px system-ui, sans-serif`;
     previewCtx.textBaseline = 'top';
     for (const detection of current) {
-      if (detection.rejected || (CNN_SIGN_LABELS.has(detection.label) && !detection.cnnVerified) || (TEXT_SIGN_LABELS.has(detection.label) && !detection.textVerified)) continue;
+      if (detection.rejected || (CNN_SIGN_LABELS.has(detection.label) && !detection.cnnVerified && !detection.legacyHeuristic)) continue;
       const sign = D.SIGNS[detection.label];
       if (!sign) continue;
       const marginX = detection.w * 0.06, marginY = detection.h * 0.06;
@@ -147,16 +175,91 @@
   }
 
   /** Erkennung auf einer Bildquelle ausführen (Video oder Foto). */
-  function analyse(source, useTracker) {
+  async function analyse(source, useTracker) {
+    if (analysisInProgress) return;
+    analysisInProgress = true;
     const t0 = performance.now();
-    wctx.drawImage(source, 0, 0, work.width, work.height);
-    const img = wctx.getImageData(0, 0, work.width, work.height);
-    const res = D.detect(img.data, work.width, work.height, { minSaturation: +$('sat').value });
-    current = useTracker ? tracker.update(res.detections) : res.detections;
-    mask = res.mask;
-    queueOcr(source, current, work.width, work.height);
-    statusEl.textContent = (running ? 'Kamera läuft' : 'Foto analysiert') + ' · ' + Math.round(performance.now() - t0) + ' ms pro Analyse';
-    renderList();
+    try {
+      wctx.drawImage(source, 0, 0, work.width, work.height);
+      const img = wctx.getImageData(0, 0, work.width, work.height);
+      let learnedBoxHead = null;
+      if (boxHeadGate.checked) { try { learnedBoxHead = await getLearnableBoxHead(); } catch (error) { statusEl.textContent = error.message; } }
+      const res = D.detect(img.data, work.width, work.height, { minSaturation: +$('sat').value, learnableBoxHead: learnedBoxHead, learnableBoxThreshold: Number(boxHeadThreshold.value) });
+      const detections = res.detections;
+      // Im alten Modus sind die heuristischen Boxen direkt sichtbar. Das CNN darf
+      // sie nachträglich genauer benennen, aber nicht als vermeintliche Boxfehler verstecken.
+      if (!boxHeadGate.checked) for (const detection of detections) detection.legacyHeuristic = true;
+      mask = res.mask;
+      current = useTracker ? tracker.update(detections) : detections;
+      if (boxHeadGate.checked) queueBinaryGate(source, current, work.width, work.height);
+      else queueOcr(source, current, work.width, work.height);
+      statusEl.textContent = (running ? 'Kamera läuft' : 'Foto analysiert') + ' · ' + Math.round(performance.now() - t0) + ' ms Boxen';
+      renderList();
+      refreshStill();
+    } catch (error) {
+      statusEl.textContent = 'Boxmodell konnte nicht laufen: ' + error.message;
+    } finally {
+      analysisInProgress = false;
+    }
+  }
+
+  /** Optional binary crop verifier runs after heuristic boxes and before either classifier. */
+  function queueBinaryGate(source, detections, analysisW, analysisH) {
+    for (const detection of detections) {
+      if (detection.stagesQueued) continue;
+      detection.stagesQueued = true;
+      binaryQueue = binaryQueue.then(async () => {
+        // GTSRB-Kopf kennt weder Ortstafel noch Hinweiszeichen. Diese gehen direkt
+        // zur Texterkennung, statt vom binären GTSRB-Vorfilter verworfen zu werden.
+        if (detection.label === 'ampel' || TEXT_SIGN_LABELS.has(detection.label)) {
+          queueOcr(source, [detection], analysisW, analysisH);
+          return;
+        }
+        if (binaryGate.checked) {
+          const result = await classifyBinaryCrop(source, detection, analysisW, analysisH);
+          detection.binaryConfidence = result.confidence;
+          if (result.confidence < Number(binaryConfidence.value)) {
+            detection.rejected = true;
+            renderList(); refreshStill();
+            return;
+          }
+        }
+        detection.binaryVerified = true;
+        queueOcr(source, [detection], analysisW, analysisH);
+      }).catch(() => {
+        detection.rejected = true;
+        detection.binaryFailed = true;
+        renderList(); refreshStill();
+      });
+    }
+  }
+
+  async function classifyBinaryCrop(source, detection, analysisW, analysisH) {
+    const session = await getBinarySession();
+    const sx = source.videoWidth || source.naturalWidth || source.width;
+    const sy = source.videoHeight || source.naturalHeight || source.height;
+    const centerX = (detection.x + detection.w / 2) * sx / analysisW;
+    const centerY = (detection.y + detection.h / 2) * sy / analysisH;
+    const side = Math.max(detection.w * sx / analysisW, detection.h * sy / analysisH) * 1.18;
+    const left = Math.max(0, Math.floor(centerX - side / 2));
+    const top = Math.max(0, Math.floor(centerY - side / 2));
+    const right = Math.min(sx, Math.ceil(centerX + side / 2));
+    const bottom = Math.min(sy, Math.ceil(centerY + side / 2));
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = 32;
+    canvas.getContext('2d', { willReadFrequently: true }).drawImage(source, left, top, right - left, bottom - top, 0, 0, 32, 32);
+    const rgba = canvas.getContext('2d').getImageData(0, 0, 32, 32).data;
+    const plane = 32 * 32, input = new Float32Array(plane * 3);
+    for (let i = 0; i < plane; i++) {
+      input[i] = rgba[i * 4] / 255;
+      input[plane + i] = rgba[i * 4 + 1] / 255;
+      input[plane * 2 + i] = rgba[i * 4 + 2] / 255;
+    }
+    const result = await session.run({ [session.inputNames[0]]: new window.ort.Tensor('float32', input, [1, 3, 32, 32]) });
+    const logits = result[session.outputNames[0]].data;
+    const max = Math.max(logits[0], logits[1]);
+    const neg = Math.exp(logits[0] - max), pos = Math.exp(logits[1] - max);
+    return { confidence: pos / (pos + neg) };
   }
 
   function refreshStill() {
@@ -239,7 +342,8 @@
         }
         const expectedSpeed = GTSRB_SPEED_CLASSES.get(signClass.index);
         if (!expectedSpeed || signClass.confidence < MIN_SIGN_CONFIDENCE || signClass.margin < MIN_SIGN_MARGIN) {
-          detection.rejected = true;
+          if (!detection.legacyHeuristic) detection.rejected = true;
+          else detection.cnnRejected = true;
           renderList();
           refreshStill();
           return;
@@ -252,7 +356,8 @@
         refreshStill();
       }).catch(() => {
         detection.cnnText = '';
-        detection.rejected = true;
+        if (!detection.legacyHeuristic) detection.rejected = true;
+        else detection.cnnFailed = true;
         detection.ocrFailed = true;
         renderList();
         refreshStill();
@@ -393,12 +498,11 @@
       const text = confidentWords.length ? confidentWords.map(word => word.text).join(' ') : (data.text || '');
       detection.ocrText = text.replace(/[^\p{L}\p{N}\s.,'’/-]/gu, ' ').replace(/\s+/g, ' ').trim();
       detection.textVerified = confidentWords.some(word => word.confidence >= 60 && /[\p{L}\p{N}]{3,}/u.test(word.text));
-      if (!detection.textVerified) detection.rejected = true;
+      // Texterkennung ergänzt die Box, entscheidet aber nicht darüber, ob das Schild existiert.
       renderList();
       refreshStill();
     }).catch(() => {
       detection.ocrFailed = true;
-      detection.rejected = true;
       renderList();
       refreshStill();
     });
@@ -481,7 +585,7 @@
   }
 
   function renderList() {
-    const shown = current.filter(t => !t.rejected && (!CNN_SIGN_LABELS.has(t.label) || t.cnnVerified) && (!TEXT_SIGN_LABELS.has(t.label) || t.textVerified));
+    const shown = current.filter(t => !t.rejected && (!CNN_SIGN_LABELS.has(t.label) || t.cnnVerified || t.legacyHeuristic));
     publishBackendSnapshot();
     const labels = [...new Set(shown.map(t => t.label))];
     const key = labels.map(l => l + ':' + shown.filter(t => t.label === l)
@@ -553,7 +657,7 @@
     ctx.lineWidth = 4; ctx.textBaseline = 'top';
     ctx.font = '600 15px Bahnschrift, "DIN Alternate", system-ui, sans-serif';
     for (const t of current) {
-      if (t.rejected || (CNN_SIGN_LABELS.has(t.label) && !t.cnnVerified) || (TEXT_SIGN_LABELS.has(t.label) && !t.textVerified)) continue;
+      if (t.rejected || (CNN_SIGN_LABELS.has(t.label) && !t.cnnVerified && !t.legacyHeuristic)) continue;
       const s = D.SIGNS[t.label], mx = t.w * 0.06, my = t.h * 0.06;
       const left = Math.max(0, t.x - mx), top = Math.max(0, t.y - my);
       const x = left * k, y = top * k;
@@ -575,7 +679,7 @@
     if (video.videoWidth) {
       setSize(video.videoWidth, video.videoHeight);
       ctx.drawImage(video, 0, 0, view.width, view.height);
-      if (now - lastRun >= INTERVAL_MS) { lastRun = now; analyse(video, true); }
+      if (now - lastRun >= INTERVAL_MS && !analysisInProgress) { lastRun = now; analyse(video, true); }
       draw();
     }
     requestAnimationFrame(frame);
@@ -629,5 +733,30 @@
     $('satOut').textContent = (+$('sat').value).toFixed(2);
     if (still) showStill();
   }));
+  boxHeadGate.addEventListener('change', () => {
+    localStorage.setItem('signScannerLearnableBoxHeadMode', boxHeadGate.checked ? 'on' : 'off');
+    if (still) showStill();
+    else if (running) { current = []; tracker = D.createTracker(4, 2); }
+  });
+  boxHeadThreshold.addEventListener('input', () => {
+    boxHeadThresholdOut.value = Number(boxHeadThreshold.value).toFixed(2);
+    localStorage.setItem('signScannerLearnableBoxThreshold', boxHeadThreshold.value);
+    if (still) showStill();
+    else if (running) { current = []; tracker = D.createTracker(4, 2); }
+  });
+  binaryGate.addEventListener('change', () => {
+    localStorage.setItem('signScannerBinaryGate', binaryGate.checked ? 'on' : 'off');
+    if (still) showStill();
+    else if (running) { current = []; tracker = D.createTracker(4, 2); }
+  });
+  binaryConfidence.addEventListener('input', () => {
+    const value = Number(binaryConfidence.value);
+    binaryConfidenceOut.value = value.toFixed(2);
+    localStorage.setItem('signScannerBinaryConfidence', String(value));
+    if (still) showStill();
+    else if (running) { current = []; tracker = D.createTracker(4, 2); }
+  });
   renderList();
 })();
+
+

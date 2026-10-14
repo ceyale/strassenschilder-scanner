@@ -1,4 +1,9 @@
 .DS_Store
 node_modules/
+dist/
+.wrangler/
 *.log
 /backend/latest-frame.jpg
+/models/yolo-ts-gtsdb.onnx
+/models/yolo-ts-gtsdb.onnx.data
+/models/yolo-ts-gtsdb-best.pt

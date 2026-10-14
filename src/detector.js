@@ -36,6 +36,8 @@
     hinweis:           { name: 'Hinweiszeichen',    zeichen: 'Z 3xx',     hex: '#1467b8', text: '#fff',    note: 'Blaues Rechteck, z. B. Parkplatz (Z 314).' },
     vorfahrtstrasse:   { name: 'Vorfahrtstraße',    zeichen: 'Z 306',     hex: '#f2c200', text: '#1e2329', note: 'Gelbe Raute mit weißem Rand.' },
     ortstafel:         { name: 'Ortstafel',         zeichen: 'Z 310',     hex: '#f2c200', text: '#1e2329', note: 'Gelbes Rechteck am Ortseingang.' },
+    haltverbot:        { name: 'Haltverbot',        zeichen: 'Z 283',     hex: '#1467b8', text: '#fff',    note: 'Blauer Kreis mit rotem Rand und Schrägbalken.' },
+    schildKandidat:    { name: 'Schildkandidat',   zeichen: 'Kandidat',  hex: '#a44fe8', text: '#fff',    note: 'Boxvorschlag des lernbaren Farb-/Formmodells.' },
     ampel:             { name: 'Ampel',             zeichen: 'Lichtsignal', hex: '#303941', text: '#fff', note: 'Vertikale Rot-Gelb-Grün-Lichtfelder erkannt.' }
   };
 
@@ -123,6 +125,9 @@
 
   /** Schritt 4a: Form bestimmen. */
   function shapeOf(s, aspect) {
+    // Ortstafeln sind breite Rechtecke; Schrift und Rahmen brechen die gelbe Fläche
+    // auf, deshalb darf deren Masken-Solidity deutlich unter 0.9 liegen.
+    if (aspect >= 1.25 && s.solidity >= 0.55) return 'rect';
     if (s.solidity < 0.65) {                                   // Dreieck oder Raute (beide ≈ 0.5)
       if (s.wTop < 0.3 && s.wBot < 0.3) return 'diamond';      // schmal oben UND unten → Raute
       return s.wTop < s.wBot ? 'triangleUp' : 'triangleDown';
@@ -154,7 +159,7 @@
     const shapeRanges = {
       circle: [0.7, 1.4, 0.67, 0.91],
       triangleUp: [0.7, 1.4, 0.34, 0.67], triangleDown: [0.7, 1.4, 0.34, 0.67],
-      diamond: [0.7, 1.4, 0.34, 0.67], rect: [0.85, 4.5, 0.82, 1.02]
+      diamond: [0.7, 1.4, 0.34, 0.67], rect: [1.2, 4.5, 0.55, 1.02]
     }[shape];
     const stats = analyzeShape(comp, mask.queue, imageW);
     if (!shapeRanges || aspect < shapeRanges[0] || aspect > shapeRanges[1] ||
@@ -182,7 +187,7 @@
     const neutralShare = neutral / Math.max(1, interior);
     if (colorShare < (comp.color === RED ? 0.07 : 0.24)) return null;
     const needsInteriorDetail = comp.color === RED || comp.color === BLUE || (comp.color === YELLOW && shape === 'rect');
-    if (needsInteriorDetail && neutralShare < (comp.color === RED ? 0.12 : 0.08)) return null;
+    if (needsInteriorDetail && neutralShare < (comp.color === RED ? 0.12 : (comp.color === YELLOW ? 0.025 : 0.08))) return null;
 
     // Ein echter roter Kreis trägt einen umlaufenden Ring. Einzelne rote
     // Kreisflächen wie Rücklichter bestehen diese Winkelabdeckung meist nicht.
@@ -209,42 +214,158 @@
   const IDEAL = { circle: 0.785, triangleUp: 0.5, triangleDown: 0.5, diamond: 0.5, rect: 1 };
   const confidence = (shape, solidity) => Math.max(0, Math.min(1, 1 - Math.abs(solidity - IDEAL[shape]) * 3));
 
-  /** Ein Bild analysieren. `data` ist RGBA (ImageData.data). */
+  /** Ampeln auch erkennen, wenn gerade nur ein oder zwei Leuchten sichtbar sind. */
   function detectTrafficLights(comps, queue, data, w) {
     const lamps = comps.filter(c => {
       if (![RED, YELLOW, GREEN].includes(c.color)) return false;
       const aspect = c.w / c.h;
-      if (aspect < 0.62 || aspect > 1.4) return false;
+      if (aspect < 0.55 || aspect > 1.6 || c.area < 12) return false;
       const stats = analyzeShape(c, queue, w);
-      return stats.solidity > 0.55 && stats.solidity < 0.98;
-    });
-    const red = lamps.filter(c => c.color === RED), yellow = lamps.filter(c => c.color === YELLOW), green = lamps.filter(c => c.color === GREEN);
+      return stats.solidity > 0.48 && stats.solidity < 0.99;
+    }).sort((a, b) => a.y - b.y);
+    const brightness = c => {
+      let sum = 0;
+      for (let k = c.start; k < c.end; k++) {
+        const p = queue[k] * 4;
+        sum += Math.max(data[p], data[p + 1], data[p + 2]);
+      }
+      return sum / Math.max(1, c.area);
+    };
     const out = [];
-    for (const r of red) for (const y of yellow) for (const g of green) {
-      const ordered = [r, y, g];
-      const centers = ordered.map(c => c.x + c.w / 2);
-      const sizes = ordered.map(c => (c.w + c.h) / 2);
-      const centerX = centers.reduce((a, b) => a + b, 0) / 3;
-      const typical = sizes.reduce((a, b) => a + b, 0) / 3;
-      if (Math.max(...centers) - Math.min(...centers) > typical * 0.65) continue;
-      if (Math.max(...sizes) / Math.max(1, Math.min(...sizes)) > 1.8) continue;
-      if (y.y <= r.y || g.y <= y.y) continue;
-      const gap1 = y.y - (r.y + r.h), gap2 = g.y - (y.y + y.h);
-      if (gap1 > typical * 2.5 || gap2 > typical * 2.5 || gap1 < -typical * 0.4 || gap2 < -typical * 0.4) continue;
-      const brightness = ordered.map(c => {
-        let sum = 0;
-        for (let k = c.start; k < c.end; k++) {
-          const p = queue[k] * 4;
-          sum += Math.max(data[p], data[p + 1], data[p + 2]);
+    for (let i = 0; i < lamps.length; i++) {
+      for (let j = i + 1; j < Math.min(lamps.length, i + 8); j++) {
+        const a = lamps[i], b = lamps[j];
+        if (a.color === b.color) continue;
+        const pair = [a, b], centers = pair.map(c => c.x + c.w / 2);
+        const sizes = pair.map(c => (c.w + c.h) / 2);
+        const typical = (sizes[0] + sizes[1]) / 2;
+        if (Math.abs(centers[0] - centers[1]) > typical * 0.75 ||
+            Math.max(...sizes) / Math.max(1, Math.min(...sizes)) > 2.0) continue;
+        const gap = b.y - (a.y + a.h);
+        if (gap > typical * 3.5 || gap < -typical * 0.5) continue;
+
+        // Prefer a matching third lamp when it is visible; otherwise paired lights
+        // remain valid when one LED is off or occluded.
+        let group = pair;
+        for (let k = j + 1; k < Math.min(lamps.length, j + 8); k++) {
+          const c = lamps[k];
+          if ([a.color, b.color].includes(c.color)) continue;
+          const center = c.x + c.w / 2, size = (c.w + c.h) / 2;
+          if (Math.abs(center - (centers[0] + centers[1]) / 2) <= typical * 0.75 &&
+              c.y - (b.y + b.h) <= typical * 3.5 && c.y >= b.y) { group = [a, b, c]; break; }
         }
-        return sum / Math.max(1, c.area);
-      });
-      const brightest = brightness.indexOf(Math.max(...brightness));
-      const names = ['Rot', 'Gelb', 'Grün'];
-      out.push({ label: 'ampel', state: names[brightest], x: Math.min(...ordered.map(c => c.x)), y: r.y,
-        w: Math.max(...ordered.map(c => c.x + c.w)) - Math.min(...ordered.map(c => c.x)),
-        h: g.y + g.h - r.y, conf: 0.82 });
-      break;
+        const active = group.reduce((best, c) => brightness(c) > brightness(best) ? c : best, group[0]);
+        const names = { [RED]: 'Rot', [YELLOW]: 'Gelb', [GREEN]: 'Grün' };
+        const left = Math.min(...group.map(c => c.x)), top = Math.min(...group.map(c => c.y));
+        const right = Math.max(...group.map(c => c.x + c.w)), bottom = Math.max(...group.map(c => c.y + c.h));
+        out.push({ label: 'ampel', state: names[active.color], x: left, y: top, w: right - left,
+          h: bottom - top, conf: group.length === 3 ? 0.82 : 0.68 });
+        break;
+      }
+      if (out.length) break;
+    }
+    return out;
+  }
+
+  function headPixelColor(r, g, b) {
+    const mx=Math.max(r,g,b), mn=Math.min(r,g,b), d=mx-mn, v=mx/255, sat=mx?d/mx:0;
+    if (sat < 55/255 || mx < 45) return NONE;
+    let h=0;
+    if (mx===r) h=60*(((g-b)/d+6)%6); else if (mx===g) h=60*((b-r)/d+2); else h=60*((r-g)/d+4);
+    if (h<=22 || h>=338) return RED;
+    if (h>=26 && h<=76) return YELLOW;
+    if (h>=176 && h<=274) return BLUE;
+    if (h>=74 && h<=176) return GREEN;
+    return NONE;
+  }
+
+  function boxHeadFeatures(data, imageW, imageH, box) {
+    const x1=Math.max(0,Math.floor(box.x)), y1=Math.max(0,Math.floor(box.y));
+    const x2=Math.min(imageW,Math.ceil(box.x+box.w)), y2=Math.min(imageH,Math.ceil(box.y+box.h));
+    const bw=Math.max(1,x2-x1), bh=Math.max(1,y2-y1), area=bw*bh;
+    let count=0, satSum=0, valSum=0, edgeCount=0, colors=[0,0,0,0];
+    const rowsMin=new Int32Array(bh).fill(bw), rowsMax=new Int32Array(bh).fill(-1);
+    const colsMin=new Int32Array(bw).fill(bh), colsMax=new Int32Array(bw).fill(-1);
+    const gray=new Uint8Array(area), colored=new Uint8Array(area);
+    for(let yy=0;yy<bh;yy++) for(let xx=0;xx<bw;xx++) {
+      const i=((y1+yy)*imageW+x1+xx)*4, r=data[i],g=data[i+1],b=data[i+2], mx=Math.max(r,g,b),mn=Math.min(r,g,b),c=headPixelColor(r,g,b);
+      const p=yy*bw+xx; gray[p]=Math.round(.299*r+.587*g+.114*b);
+      satSum+=mx?(mx-mn)/mx:0; valSum+=mx/255;
+      if(c){ colored[p]=1;count++;colors[c===RED?0:c===BLUE?1:c===YELLOW?2:3]++; if(xx<rowsMin[yy])rowsMin[yy]=xx;if(xx>rowsMax[yy])rowsMax[yy]=xx;if(yy<colsMin[xx])colsMin[xx]=yy;if(yy>colsMax[xx])colsMax[xx]=yy; }
+    }
+    // The row/column extrema form a compact approximation of the convex hull.
+    const pts=[];
+    for(let y=0;y<bh;y++)if(rowsMax[y]>=0){pts.push([rowsMin[y],y],[rowsMax[y],y]);}
+    for(let x=0;x<bw;x++)if(colsMax[x]>=0){pts.push([x,colsMin[x]],[x,colsMax[x]]);}
+    pts.sort((a,b)=>a[0]-b[0]||a[1]-b[1]);
+    const cross=(o,a,b)=>(a[0]-o[0])*(b[1]-o[1])-(a[1]-o[1])*(b[0]-o[0]);
+    const hull=[];
+    for(const q of pts){while(hull.length>=2&&cross(hull[hull.length-2],hull[hull.length-1],q)<=0)hull.pop();hull.push(q);}
+    const lower=hull.length;
+    for(let i=pts.length-2;i>=0;i--){const q=pts[i];while(hull.length>lower&&cross(hull[hull.length-2],hull[hull.length-1],q)<=0)hull.pop();hull.push(q);}
+    let hullArea=0;for(let i=0;i<hull.length;i++){const a=hull[i],b=hull[(i+1)%hull.length];hullArea+=a[0]*b[1]-a[1]*b[0];}hullArea=Math.abs(hullArea)/2;
+    for(let y=1;y<bh-1;y++)for(let x=1;x<bw-1;x++){const i=y*bw+x,gx=-gray[i-bw-1]+gray[i-bw+1]-2*gray[i-1]+2*gray[i+1]-gray[i+bw-1]+gray[i+bw+1],gy=-gray[i-bw-1]-2*gray[i-bw]-gray[i-bw+1]+gray[i+bw-1]+2*gray[i+bw]+gray[i+bw+1];if(Math.hypot(gx,gy)>210)edgeCount++;}
+    const aspect=bw/bh, solidity=count/area, compact=count/Math.max(1,hullArea);
+    return [Math.min(1,bw/imageW),Math.min(1,bh/imageH),Math.max(-1,Math.min(1,Math.log(Math.max(aspect,1e-4))/2)),Math.min(1,area/(imageW*imageH)*30),solidity,Math.min(1,compact),satSum/area,valSum/area,
+      colors[0]/area,colors[1]/area,colors[2]/area,colors[3]/area,edgeCount/area,Math.min(1,Math.abs(1-aspect)/4),Math.min(1,Math.abs(solidity-.785)*2),Math.min(1,Math.abs(solidity-.5)*2),Math.min(1,colors[0]*colors[1]/(area*area)*8),solidity];
+  }
+
+  function runBoxHead(features, model) {
+    const normalized=features.map((v,i)=>(v-model.mean[i])/model.std[i]), hidden=[];
+    for(let j=0;j<model.hidden_units;j++){let x=model.b1[j];for(let i=0;i<normalized.length;i++)x+=model.w1[j][i]*normalized[i];hidden.push(Math.tanh(x));}
+    const out=[];for(let k=0;k<5;k++){let x=model.b2[k];for(let j=0;j<hidden.length;j++)x+=model.w2[k][j]*hidden[j];out.push(x);}
+    return {score:1/(1+Math.exp(-Math.max(-30,Math.min(30,out[0])))),offsets:out.slice(1)};
+  }
+
+  function applyLearnableBoxHead(data,w,h,detections,model,cfg) {
+    if(!model||model.feature_count!==18)return detections;
+    const headMask=new Uint8Array(w*h), colorMasks=[new Uint8Array(w*h),new Uint8Array(w*h),new Uint8Array(w*h),new Uint8Array(w*h)];
+    for(let p=0,i=0;p<headMask.length;p++,i+=4){const c=headPixelColor(data[i],data[i+1],data[i+2]);if(c){headMask[p]=1;colorMasks[c===RED?0:c===BLUE?1:c===YELLOW?2:3][p]=c;}}
+    const hc=Object.assign({},cfg,{minBox:5,minArea:10,maxFrameShare:.8,minAspect:.38,maxAspect:5.2});
+    const raw=[];
+    for(const m of [headMask,...colorMasks]){const found=findComponents(m,w,h,hc).comps;for(const c of found)raw.push({x:c.x,y:c.y,w:c.w,h:c.h});}
+    const proposals=[];
+    for(const b of raw)for(const scale of [1,1.18]){const ww=b.w*scale,hh=b.h*scale,cx=b.x+b.w/2,cy=b.y+b.h/2,q={x:Math.max(0,cx-ww/2),y:Math.max(0,cy-hh/2),w:Math.min(w,cx+ww/2)-Math.max(0,cx-ww/2),h:Math.min(h,cy+hh/2)-Math.max(0,cy-hh/2)};if(q.w>=5&&q.h>=5&&!proposals.some(a=>iou(a,q)>.88))proposals.push(q);if(proposals.length>=240)break;}
+    const added=[];
+    const scoreThreshold=Number.isFinite(cfg.learnableBoxThreshold)?cfg.learnableBoxThreshold:(model.threshold||.55);
+    for(const b of proposals){const f=boxHeadFeatures(data,w,h,b),r=runBoxHead(f,model);if(r.score<scoreThreshold)continue;
+      const bw=b.w,bh=b.h,cx=b.x+bw/2+r.offsets[0]*bw,cy=b.y+bh/2+r.offsets[1]*bh,ww=bw*Math.exp(Math.max(-.6,Math.min(.6,r.offsets[2]))),hh=bh*Math.exp(Math.max(-.6,Math.min(.6,r.offsets[3])));
+      const refined={x:Math.max(0,cx-ww/2),y:Math.max(0,cy-hh/2),w:Math.min(w,cx+ww/2)-Math.max(0,cx-ww/2),h:Math.min(h,cy+hh/2)-Math.max(0,cy-hh/2)};
+      const match=detections.find(d=>iou(d,refined)>.28);
+      if(match){match.learnedBoxScore=r.score;match.x=match.x*.65+refined.x*.35;match.y=match.y*.65+refined.y*.35;match.w=match.w*.65+refined.w*.35;match.h=match.h*.65+refined.h*.35;continue;}
+      if(added.some(a=>iou(a,refined)>.45))continue;
+      added.push(Object.assign({label:'schildKandidat',shape:'candidate',conf:r.score,learnedBoxScore:r.score,learnedBox:true},refined));
+    }
+    return detections.concat(added);
+  }
+
+  // Haltverbot hat eine blaue Kreisfläche und ein rotes X. Die X-Balken zerlegen
+  // die blaue Fläche in mehrere Komponenten; deshalb verbinden wir Rot und Blau
+  // für diesen Schildtyp und prüfen die Farbanteile der gemeinsamen Box.
+  function detectHaltverbotUnion(mask, w, h) {
+    const seen = new Uint8Array(mask.length), queue = new Int32Array(mask.length), out = [];
+    for (let start = 0; start < mask.length; start++) {
+      if (seen[start] || (mask[start] !== RED && mask[start] !== BLUE)) continue;
+      let head = 0, tail = 0, minX = w, minY = h, maxX = 0, maxY = 0, red = 0, blue = 0;
+      queue[tail++] = start; seen[start] = 1;
+      while (head < tail) {
+        const p = queue[head++], x = p % w, y = (p / w) | 0, c = mask[p];
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+        if (c === RED) red++; else blue++;
+        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+          if (!dx && !dy) continue;
+          const nx = x + dx, ny = y + dy;
+          if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+          const q = ny * w + nx, nc = mask[q];
+          if (!seen[q] && (nc === RED || nc === BLUE)) { seen[q] = 1; queue[tail++] = q; }
+        }
+      }
+      const bw = maxX - minX + 1, bh = maxY - minY + 1, boxArea = bw * bh, total = red + blue;
+      if (bw < 12 || bh < 12 || bw / bh < .68 || bw / bh > 1.45 || boxArea > w * h * .30) continue;
+      if (total / boxArea < .10 || red / total < .045 || blue / total < .12) continue;
+      out.push({ label: 'haltverbot', shape: 'circle', x: minX, y: minY, w: bw, h: bh,
+        conf: Math.min(.92, .68 + Math.min(red / total, blue / total) * .6) });
     }
     return out;
   }
@@ -264,8 +385,10 @@
       const conf = signEvidence(data, mask, w, c, shape);
       if (conf >= 0.42) detections.push({ label, shape, x: c.x, y: c.y, w: c.w, h: c.h, conf });
     }
+    detections.push(...detectHaltverbotUnion(pixels, w, h));
     detections.push(...detectTrafficLights(comps, queue, data, w));
-    return { detections: suppressNestedDetections(detections), mask: pixels };
+    const learned = applyLearnableBoxHead(data,w,h,detections,options.learnableBoxHead,cfg);
+    return { detections: suppressNestedDetections(learned), mask: pixels };
   }
 
   /** Farbige Innenformen nicht zusätzlich als eigenständige Schilder melden. */

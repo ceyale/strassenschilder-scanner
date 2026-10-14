@@ -21,7 +21,11 @@
     <label class="btn">Foto wählen<input id="file" type="file" accept="image/*"></label>
   </div>
   <div class="row tune">
-    <label>Farbstrenge <input id="sat" type="range" min="0.15" max="0.8" step="0.05" value="0.4"> <output id="satOut">0.40</output></label>
+    <label>Farbstrenge <input id="sat" type="range" min="0.15" max="0.8" step="0.05" value="0.3"> <output id="satOut">0.30</output></label>
+    <label><input id="boxHeadGate" type="checkbox"> Lernbare Box-Erkennung (experimentell; aus = alte Heuristik)</label>
+    <label>Box-Strenge <input id="boxHeadThreshold" type="range" min="0.10" max="0.90" step="0.05" value="0.30"> <output id="boxHeadThresholdOut">0.30</output></label>
+    <label><input id="binaryGate" type="checkbox" checked> Schild/Kein-Schild-Prüfung</label>
+    <label>Schildfilter Confidence <input id="binaryConfidence" type="range" min="0.05" max="0.80" step="0.05" value="0.20"> <output id="binaryConfidenceOut">0.20</output></label>
     <label><input id="maskCb" type="checkbox"> Farbmasken zeigen</label>
   </div>
   <details class="backend-settings">
@@ -34,7 +38,7 @@
   <ul id="list"></ul>
 </main>
 <script src="src/detector.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.webgpu.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <script src="src/app.js"></script>
 </body>

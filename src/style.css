@@ -16,6 +16,7 @@ button, .btn { font: inherit; font-weight: 600; background: var(--blue); color: 
 .btn input { display: none; }
 button:focus-visible, .btn:focus-within, input:focus-visible { outline: 3px solid var(--marking); outline-offset: 2px; }
 .tune { color: var(--muted); font-size: .95rem; }
+.tune select { padding: 7px 9px; color: var(--marking); background: var(--panel); border: 1px solid var(--muted); border-radius: 5px; font: inherit; }
 .backend-settings { margin-top: 14px; padding: 10px 12px; background: var(--panel); border-radius: 6px; }
 .backend-settings summary { cursor: pointer; font-weight: 600; }
 .backend-settings label { display: grid; gap: 6px; margin-top: 10px; }

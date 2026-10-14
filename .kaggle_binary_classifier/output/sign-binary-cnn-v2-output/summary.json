@@ -1,0 +1,14 @@
+{
+  "best_epoch": 43,
+  "best_validation_accuracy": 0.9950448324681453,
+  "parameters": 4202,
+  "input_resolution": "32x32",
+  "cpu_latency_ms_median": 1.1656259998744645,
+  "cpu_latency_ms_p95": 1.484449499776019,
+  "patience_epochs": 20,
+  "max_epochs": 150,
+  "checkpoint_epochs_saved": [
+    20,
+    50
+  ]
+}
