@@ -1,0 +1,2 @@
+# Optional town-name OCR. PaddlePaddle must have a compatible wheel for this Python version.
+paddleocr>=3.2.0

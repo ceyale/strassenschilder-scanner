@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parent
 MODEL_PATH = Path(os.environ.get("SIGN_YOLO_MODEL", ROOT / "models" / "yolo26s-signs.pt"))
 FALLBACK_MODEL = "yolo26s.pt"
 CLASSIFIER_PATH = ROOT / "models" / "gtsrb-sign-cnn.onnx"
+INFERENCE_SIZE = int(os.environ.get("SIGN_YOLO_IMGSZ", "512"))
 SPEED_CLASSES = {0: 20, 1: 30, 2: 50, 3: 60, 4: 70, 5: 80, 7: 100, 8: 120}
 TURN_CLASSES = {33: "rechts", 34: "links", 36: "rechts", 37: "links", 38: "rechts", 39: "links"}
 WARNING_CLASSES = {11, *range(18, 32)}
@@ -69,10 +70,34 @@ class PCVision:
             raise RuntimeError("YOLO fehlt. Installiere requirements-pc-vision.txt.") from error
         self.custom_model = MODEL_PATH.is_file()
         self.model_path = str(MODEL_PATH if self.custom_model else FALLBACK_MODEL)
+        self.device = "cpu"
         try:
+            # OpenVINO exposes Intel integrated graphics to Ultralytics without CUDA.
+            # Export once and reuse the generated IR directory on future backend starts.
+            import openvino as ov
+            if "GPU" in ov.Core().available_devices:
+                source_model = YOLO(self.model_path)
+                exported_path = Path(self.model_path).with_suffix("").with_name(
+                    Path(self.model_path).stem + "_openvino_model"
+                )
+                if not exported_path.exists():
+                    exported_path = Path(source_model.export(
+                        format="openvino", imgsz=INFERENCE_SIZE, half=False,
+                        dynamic=False, device="cpu", verbose=False
+                    ))
+                self.detector = YOLO(str(exported_path))
+                self.device = "intel:GPU"
+            else:
+                self.detector = YOLO(self.model_path)
+        except ImportError:
             self.detector = YOLO(self.model_path)
         except Exception as error:
-            raise RuntimeError(f"YOLO-Modell konnte nicht geladen werden: {error}") from error
+            # Keep the service usable if OpenVINO export/GPU initialization fails.
+            try:
+                self.detector = YOLO(self.model_path)
+                self.device = "cpu"
+            except Exception as fallback_error:
+                raise RuntimeError(f"YOLO-Modell konnte nicht geladen werden: {fallback_error}") from error
         try:
             import onnxruntime as ort
         except ImportError as error:
@@ -137,7 +162,10 @@ class PCVision:
         image = Image.open(__import__("io").BytesIO(image_bytes)).convert("RGB")
         width, height = image.size
         start = time.perf_counter()
-        predictions = self.detector.predict(image, imgsz=640, conf=0.25, device="cpu", verbose=False)
+        predictions = self.detector.predict(
+            image, imgsz=INFERENCE_SIZE, conf=0.25, device=self.device,
+            max_det=20, verbose=False
+        )
         detections = []
         for result in predictions:
             for box in result.boxes:
@@ -219,7 +247,7 @@ class PCVision:
             "imageWidth": width,
             "imageHeight": height,
             "inferenceMs": round((time.perf_counter() - start) * 1000),
-            "model": "YOLO26s" + (" custom" if self.custom_model else " COCO-Basis"),
+            "model": "YOLO26s" + (" custom" if self.custom_model else " COCO-Basis") + " · " + self.device,
         }
 
 

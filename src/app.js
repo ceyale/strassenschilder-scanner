@@ -71,7 +71,8 @@
   let lastBackendKey = '', backendRetryAt = 0, lastBackendSentAt = 0;
   let recognitionMode = localStorage.getItem('signScannerRecognitionMode') === 'pc' ? 'pc' : 'local';
   let pcRequestInFlight = false, lastPcFrameAt = 0;
-  const PC_FRAME_INTERVAL_MS = 700;
+  const PC_FRAME_INTERVAL_MS = 500;
+  const PC_MAX_RESULT_AGE_MS = 2500;
 
   backendUrlInput.value = localStorage.getItem('signScannerBackendUrl') || '';
   backendUrlInput.addEventListener('change', () => {
@@ -156,6 +157,7 @@
     const sourceHeight = source.videoHeight || source.naturalHeight || source.height;
     if (!sourceWidth || !sourceHeight) return;
     lastPcFrameAt = now;
+    const frameCapturedAt = performance.now();
     pcRequestInFlight = true;
     const maxWidth = 1280, scale = Math.min(1, maxWidth / sourceWidth);
     const frameCanvas = document.createElement('canvas');
@@ -177,6 +179,16 @@
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || result.message || ('HTTP ' + response.status));
       if (recognitionMode !== 'pc') return;
+      const resultAge = performance.now() - frameCapturedAt;
+      if (running && resultAge > PC_MAX_RESULT_AGE_MS) {
+        current = [];
+        mask = null;
+        statusEl.textContent = `PC-Erkennung zu langsam · ${(resultAge / 1000).toFixed(1)} s · altes Bild verworfen`;
+        backendStatus.textContent = 'Ergebnis verworfen, damit keine veralteten Schilder eingeblendet bleiben.';
+        renderList();
+        draw();
+        return;
+      }
       const sx = work.width / (result.imageWidth || frameCanvas.width);
       const sy = work.height / (result.imageHeight || frameCanvas.height);
       current = (result.detections || []).filter(item => D.SIGNS[item.label]).map(item => ({

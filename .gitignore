@@ -4,3 +4,10 @@ node_modules/
 /backend/latest-frame.jpg
 /backend/cloudflare-url.txt
 /models/yolo26s-signs.pt
+/yolo26s.pt
+/*_openvino_model/
+/models/*_openvino_model/
+/.wrangler/
+/__pycache__/
+/cloudflare-pages-upload/
+/cloudflare-pages-upload.zip

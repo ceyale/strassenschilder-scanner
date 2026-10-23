@@ -1,7 +1,6 @@
 # Install in the same Python environment used to run server.py.
 ultralytics>=8.4.0
 onnxruntime>=1.24.0
+openvino>=2024.0.0
 Pillow>=10.0.0
 numpy>=1.26.0
-# Optional OCR for Ortstafeln; PaddlePaddle must also have a wheel for your Python.
-paddleocr>=3.2.0
