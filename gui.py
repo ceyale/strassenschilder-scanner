@@ -28,6 +28,8 @@ class SignMonitor:
         ttk.Label(frame, text="Empfangene Schilder", font=("Segoe UI", 17, "bold")).pack(anchor="w")
         self.status = ttk.Label(frame, text="Verbinde mit Backend …")
         self.status.pack(anchor="w", pady=(4, 10))
+        self.control_status = ttk.Label(frame, text="EV3-Befehl: noch keine Kameradaten")
+        self.control_status.pack(anchor="w", pady=(0, 10))
 
         content = ttk.Panedwindow(frame, orient="horizontal")
         content.pack(fill="both", expand=True)
@@ -74,6 +76,13 @@ class SignMonitor:
             received = data.get("receivedAt")
             image_status = " · JPEG gespeichert" if data.get("imageAvailable") else ""
             self.status.configure(text="Backend verbunden · letzter Empfang: " + (received or "noch keiner") + image_status)
+            command = data.get("control", {})
+            reason = command.get("stopReason") or "Fahrt freigegeben"
+            self.control_status.configure(text=(
+                f"EV3-Befehl: {reason} · Antrieb {command.get('drivePower', 0)} % · "
+                f"Lenkung {command.get('steeringAngle', 0)}° · "
+                f"Ampel {command.get('trafficLight', 'unbekannt')}"
+            ))
             if received and received != self.last_received:
                 self.last_received = received
                 if data.get("imageAvailable"):

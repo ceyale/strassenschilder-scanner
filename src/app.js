@@ -6,6 +6,7 @@
   'use strict';
   const D = SignDetector;
   const CNN_SIGN_LABELS = new Set(['stop', 'verbot', 'einfahrtVerboten', 'vorfahrtGewaehren', 'warnung', 'gebot', 'vorfahrtstrasse']);
+  const TURN_DIRECTIONS = { 33: 'rechts', 34: 'links', 36: 'rechts', 37: 'links', 38: 'rechts', 39: 'links' };
   const TEXT_SIGN_LABELS = new Set(['hinweis', 'ortstafel']);
   const GTSRB_SPEED_CLASSES = new Map([[0, 20], [1, 30], [2, 50], [3, 60], [4, 70], [5, 80], [7, 100], [8, 120]]);
   const GTSRB_WARNING_CLASSES = new Set([11, ...Array.from({ length: 14 }, (_, i) => i + 18)]);
@@ -15,6 +16,8 @@
   const $ = id => document.getElementById(id);
   const view = $('view'), ctx = view.getContext('2d');           // sichtbares Bild + Rahmen
   const backendUrlInput = $('backendUrl'), backendStatus = $('backendStatus');
+  const localModeBtn = $('localModeBtn'), pcModeBtn = $('pcModeBtn');
+  const modeHelp = $('modeHelp');
   const work = document.createElement('canvas');                  // kleines Bild für die Analyse
   const wctx = work.getContext('2d', { willReadFrequently: true });
   const maskCv = document.createElement('canvas');                // Farbmasken-Ansicht (Debug)
@@ -66,6 +69,9 @@
   let stream = null, running = false, still = null, lastRun = 0, lastKey = '', dims = '';
   let tracker = D.createTracker(4, 2), current = [], mask = null;
   let lastBackendKey = '', backendRetryAt = 0, lastBackendSentAt = 0;
+  let recognitionMode = localStorage.getItem('signScannerRecognitionMode') === 'pc' ? 'pc' : 'local';
+  let pcRequestInFlight = false, lastPcFrameAt = 0;
+  const PC_FRAME_INTERVAL_MS = 700;
 
   backendUrlInput.value = localStorage.getItem('signScannerBackendUrl') || '';
   backendUrlInput.addEventListener('change', () => {
@@ -74,19 +80,37 @@
     publishBackendSnapshot();
   });
 
+  function getBackendEndpoint() {
+    const configured = backendUrlInput.value.trim();
+    const address = configured || (location.protocol.startsWith('http') ? location.origin : '');
+    if (!address) return '';
+    try {
+      const url = new URL(address, location.href);
+      const path = url.pathname.replace(/\/+$/, '');
+      if (url.pathname !== path) url.pathname = path;
+      if (!path.endsWith('/api/signs')) url.pathname = (path || '') + '/api/signs';
+      return url.href;
+    } catch {
+      return address;
+    }
+  }
+
   /** Send only confirmed, currently visible signs to the configured PC service. */
   function publishBackendSnapshot() {
+    if (recognitionMode === 'pc') return;
     const signs = current.filter(t => !t.rejected && (!CNN_SIGN_LABELS.has(t.label) || t.cnnVerified) && (!TEXT_SIGN_LABELS.has(t.label) || t.textVerified));
     const items = signs.map(t => ({
       label: t.label,
       name: D.SIGNS[t.label].name,
       value: t.label === 'verbot' ? Number((t.cnnText || '').match(/\d+/)?.[0]) || null : null,
+      state: t.state || '',
+      direction: t.direction || '',
       text: t.ocrText || t.cnnText || t.state || '',
       confidence: Number(t.conf.toFixed(3))
     }));
     const key = JSON.stringify(items);
     if ((key === lastBackendKey && (!running || Date.now() - lastBackendSentAt < 250)) || Date.now() < backendRetryAt) return;
-    const endpoint = backendUrlInput.value.trim() || (location.protocol.startsWith('http') ? location.origin + '/api/signs' : '');
+    const endpoint = getBackendEndpoint();
     if (!endpoint) { backendStatus.textContent = 'Adresse fehlt (Backend läuft auf dem PC).'; return; }
     backendStatus.textContent = 'Sende erkannte Schilder …';
     const jpegFrame = (running || still) ? createAnnotatedJpeg() : null;
@@ -102,6 +126,98 @@
       backendRetryAt = Date.now() + 5000;
       backendStatus.textContent = 'Backend nicht erreichbar: ' + error.message;
     });
+  }
+
+  function getPcFrameEndpoint() {
+    const configured = backendUrlInput.value.trim();
+    const address = configured || (location.protocol.startsWith('http') ? location.origin : '');
+    if (!address) return '';
+    try {
+      const url = new URL(address, location.href);
+      const path = url.pathname.replace(/\/+$/, '').replace(/\/api\/(signs|frame)$/, '');
+      url.pathname = (path || '') + '/api/frame';
+      return url.href;
+    } catch {
+      return address;
+    }
+  }
+
+  /** Send an unannotated camera frame; all AI inference runs in server.py. */
+  async function sendPcFrame(source, force = false) {
+    if (pcRequestInFlight || recognitionMode !== 'pc') return;
+    const now = performance.now();
+    if (!force && now - lastPcFrameAt < PC_FRAME_INTERVAL_MS) return;
+    const endpoint = getPcFrameEndpoint();
+    if (!endpoint) {
+      backendStatus.textContent = 'Backend-Adresse fehlt.';
+      return;
+    }
+    const sourceWidth = source.videoWidth || source.naturalWidth || source.width;
+    const sourceHeight = source.videoHeight || source.naturalHeight || source.height;
+    if (!sourceWidth || !sourceHeight) return;
+    lastPcFrameAt = now;
+    pcRequestInFlight = true;
+    const maxWidth = 1280, scale = Math.min(1, maxWidth / sourceWidth);
+    const frameCanvas = document.createElement('canvas');
+    frameCanvas.width = Math.max(1, Math.round(sourceWidth * scale));
+    frameCanvas.height = Math.max(1, Math.round(sourceHeight * scale));
+    frameCanvas.getContext('2d').drawImage(source, 0, 0, frameCanvas.width, frameCanvas.height);
+    let imageJpeg = frameCanvas.toDataURL('image/jpeg', 0.68);
+    if (imageJpeg.length > 1_800_000) imageJpeg = frameCanvas.toDataURL('image/jpeg', 0.5);
+    backendStatus.textContent = 'Sende Kamerabild an den PC …';
+    try {
+      const response = await fetch(endpoint, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          source: 'strassenschilder-scanner',
+          detectedAt: new Date().toISOString(),
+          imageJpeg
+        })
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || result.message || ('HTTP ' + response.status));
+      if (recognitionMode !== 'pc') return;
+      const sx = work.width / (result.imageWidth || frameCanvas.width);
+      const sy = work.height / (result.imageHeight || frameCanvas.height);
+      current = (result.detections || []).filter(item => D.SIGNS[item.label]).map(item => ({
+        ...item,
+        x: item.x * sx, y: item.y * sy, w: item.w * sx, h: item.h * sy,
+        conf: Number(item.confidence ?? item.conf ?? 0),
+        cnnVerified: true, textVerified: true
+      }));
+      mask = null;
+      statusEl.textContent = `PC-Erkennung · ${result.model || 'YOLO26s'} · ${result.inferenceMs ?? '?'} ms`;
+      backendStatus.textContent = `PC erkennt · ${current.length} Schild(er)`;
+      lastKey = '';
+      renderList();
+      if (!running) refreshStill();
+      draw();
+    } catch (error) {
+      backendStatus.textContent = 'PC-Erkennung nicht verfügbar: ' + error.message;
+    } finally {
+      pcRequestInFlight = false;
+    }
+  }
+
+  function setRecognitionMode(mode) {
+    recognitionMode = mode;
+    localStorage.setItem('signScannerRecognitionMode', mode);
+    localModeBtn.setAttribute('aria-pressed', String(mode === 'local'));
+    pcModeBtn.setAttribute('aria-pressed', String(mode === 'pc'));
+    modeHelp.textContent = mode === 'pc'
+      ? 'Das Handy sendet nur Kamerabilder. YOLO und Klassifizierung laufen auf dem PC. Ohne models/yolo26s-signs.pt wird das COCO-Basismodell geladen; es erkennt nicht alle deutschen Verkehrszeichen.'
+      : 'Erkennung läuft im Browser auf dem Handy.';
+    current = [];
+    mask = null;
+    lastKey = '';
+    renderList();
+    if (mode === 'local') {
+      getCharacterSession().catch(() => {});
+      getSignSession().catch(() => {});
+      if (still) showStill();
+    } else if (still) {
+      sendPcFrame(still, true);
+    }
   }
 
   /** Encode the current analysis frame with the same detection boxes as the preview. */
@@ -232,6 +348,7 @@
         }
         if (signClass.index >= 33 && signClass.index <= 40 && signClass.confidence >= MIN_SIGN_CONFIDENCE && signClass.margin >= MIN_SIGN_MARGIN) {
           detection.label = 'gebot';
+          detection.direction = TURN_DIRECTIONS[signClass.index] || '';
           detection.cnnVerified = true;
           renderList();
           refreshStill();
@@ -485,7 +602,7 @@
     publishBackendSnapshot();
     const labels = [...new Set(shown.map(t => t.label))];
     const key = labels.map(l => l + ':' + shown.filter(t => t.label === l)
-      .map(t => [t.ocrText || '', t.cnnText || '', t.state || '', t.ocrFailed || '', t.cnnFailed || ''].join('/')).join('|')).join();
+      .map(t => [t.ocrText || '', t.cnnText || '', t.state || '', t.direction || '', t.ocrFailed || '', t.cnnFailed || ''].join('/')).join('|')).join();
     if (key === lastKey) return;
     lastKey = key;
     list.replaceChildren();
@@ -503,6 +620,8 @@
       title.textContent = sign.name;
       number.textContent = sign.zeichen;
       note.textContent = sign.note;
+      const directions = [...new Set(shown.filter(t => t.label === label).map(t => t.direction).filter(Boolean))];
+      if (directions.length) note.textContent += ' Erkannte Richtung: ' + directions.join(', ') + '.';
       li.append(title, number, note);
       const texts = [...new Set(shown.filter(t => t.label === label).map(t => t.ocrText).filter(Boolean))];
       if (texts.length) {
@@ -575,7 +694,11 @@
     if (video.videoWidth) {
       setSize(video.videoWidth, video.videoHeight);
       ctx.drawImage(video, 0, 0, view.width, view.height);
-      if (now - lastRun >= INTERVAL_MS) { lastRun = now; analyse(video, true); }
+      if (recognitionMode === 'pc') {
+        sendPcFrame(video);
+      } else if (now - lastRun >= INTERVAL_MS) {
+        lastRun = now; analyse(video, true);
+      }
       draw();
     }
     requestAnimationFrame(frame);
@@ -588,8 +711,10 @@
     }
     // Modell und WASM parallel zur Kameraberechtigung laden, damit die erste
     // Schilderkennung nicht auf den Kaltstart warten muss.
-    getCharacterSession().catch(() => {});
-    getSignSession().catch(() => {});
+    if (recognitionMode === 'local') {
+      getCharacterSession().catch(() => {});
+      getSignSession().catch(() => {});
+    }
     try {
       stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false });
@@ -612,10 +737,13 @@
   function showStill() {
     setSize(still.naturalWidth, still.naturalHeight);
     ctx.drawImage(still, 0, 0, view.width, view.height);
-    analyse(still, false); draw();
+    if (recognitionMode === 'pc') sendPcFrame(still, true);
+    else { analyse(still, false); draw(); }
   }
 
   $('camBtn').addEventListener('click', () => (running ? stopCamera() : startCamera()));
+  localModeBtn.addEventListener('click', () => setRecognitionMode('local'));
+  pcModeBtn.addEventListener('click', () => setRecognitionMode('pc'));
   $('file').addEventListener('change', e => {
     const f = e.target.files[0];
     if (!f) return;
@@ -630,4 +758,5 @@
     if (still) showStill();
   }));
   renderList();
+  setRecognitionMode(recognitionMode);
 })();

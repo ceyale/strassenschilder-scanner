@@ -1,0 +1,17 @@
+[Unit]
+Description=EV3 Truck Bluetooth HID Gamepad Bridge
+After=bluetooth.service network-online.target
+Requires=bluetooth.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ev3-gamepad
+ExecStart=/usr/bin/python3 /opt/ev3-gamepad/bridge.py
+Restart=on-failure
+RestartSec=2
+User=root
+Environment=PYTHONUNBUFFERED=1
+Environment=EV3_COMMAND_PORT=8766
+
+[Install]
+WantedBy=multi-user.target
