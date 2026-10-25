@@ -60,6 +60,18 @@ def _classify_light(crop: Image.Image) -> str:
     return state if score >= 14 else ""
 
 
+def _traffic_light_state_from_class(name: str) -> str:
+    """Use the fine-tuned detector's state class when it supplies one."""
+    normalized = name.lower().replace("_", " ")
+    if normalized.endswith((" red", " rot")):
+        return "rot"
+    if normalized.endswith((" yellow", " gelb")):
+        return "gelb"
+    if normalized.endswith((" green", " gruen", " grün")):
+        return "gruen"
+    return ""
+
+
 class PCVision:
     """YOLO candidate detector plus the existing GTSRB crop classifier."""
 
@@ -180,7 +192,9 @@ class PCVision:
                 crop = image.crop((x1, y1, x2, y2))
                 direct_label = DIRECT_LABELS.get(name)
                 if "traffic light" in name or "ampel" in name:
-                    state = _classify_light(crop)
+                    if name.endswith((" off", " aus")):
+                        continue
+                    state = _traffic_light_state_from_class(name) or _classify_light(crop)
                     if not state:
                         continue
                     detections.append({

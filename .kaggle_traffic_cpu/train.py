@@ -1,4 +1,6 @@
 import csv
+import hashlib
+import itertools
 import json
 import os
 import random
@@ -6,6 +8,8 @@ import shutil
 import subprocess
 import time
 import xml.etree.ElementTree as ET
+import urllib.request
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -20,14 +24,26 @@ SYNSET_TRAIN_LIMIT = 5000
 SYNSET_VAL_LIMIT = 1000
 EPOCHS = 5
 
+# Bosch Small Traffic Lights Dataset, additional training subset. The complete
+# RGB archive is only 277 MB; we keep only easy, unoccluded examples at runtime.
+# Dataset: Behrendt & Novak, ICRA 2017, https://doi.org/10.1109/ICRA.2017.7989163
+# Non-commercial license: https://zenodo.org/records/12706046
+BSTLD_ARCHIVE_URL = 'https://zenodo.org/records/12706046/files/dataset_additional_rgb.zip?download=1'
+BSTLD_ARCHIVE_MD5 = 'b0456515ffc34fa15343100d25a8e8b3'
+BSTLD_LABELS_URL = 'https://raw.githubusercontent.com/bosch-ros-pkg/bstld/master/label_files/additional_train.yaml'
+BSTLD_MAX_IMAGES = 80
+BSTLD_MIN_BOX_WIDTH = 12.0
+BSTLD_MIN_BOX_HEIGHT = 18.0
+BSTLD_MAX_BOXES_PER_IMAGE = 4
 
-def yolo_line(box, width, height):
+
+def yolo_line(box, width, height, class_id=0):
     x1, y1, x2, y2 = [float(v) for v in box]
     x1, x2 = sorted((max(0.0, min(width, x1)), max(0.0, min(width, x2))))
     y1, y2 = sorted((max(0.0, min(height, y1)), max(0.0, min(height, y2))))
     if x2 <= x1 or y2 <= y1:
         return None
-    return f'0 {(x1+x2)/(2*width):.6f} {(y1+y2)/(2*height):.6f} {(x2-x1)/width:.6f} {(y2-y1)/height:.6f}'
+    return f'{class_id} {(x1+x2)/(2*width):.6f} {(y1+y2)/(2*height):.6f} {(x2-x1)/width:.6f} {(y2-y1)/height:.6f}'
 
 
 def add_image(image_path, boxes, split, source, index):
@@ -42,7 +58,15 @@ def add_image(image_path, boxes, split, source, index):
             target.parent.mkdir(parents=True, exist_ok=True)
             label.parent.mkdir(parents=True, exist_ok=True)
             im.save(target, quality=92)
-        lines = [line for box in boxes if (line := yolo_line(box, width, height))]
+        lines = []
+        for box in boxes:
+            if len(box) == 5:
+                class_id, *coords = box
+                line = yolo_line(coords, width, height, class_id=int(class_id))
+            else:
+                line = yolo_line(box, width, height)
+            if line:
+                lines.append(line)
         label.write_text('\n'.join(lines), encoding='utf-8')
         return True
     except Exception as exc:
@@ -97,6 +121,121 @@ def parse_gtsdb():
         count += add_image(path, boxes, split, 'gtsdb', i)
     print(f'GTSDB: {len(images)} scene images, {count} used, {sum(not annotations.get(p.name.lower(), annotations.get(p.stem.lower(), [])) for p in images)} candidate negatives')
     return count
+
+
+def _download_bstld_file(url, target, expected_md5=None):
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not target.exists() or target.stat().st_size == 0:
+        print(f'DOWNLOADING {target.name} from {url}', flush=True)
+        urllib.request.urlretrieve(url, target)
+    if expected_md5:
+        digest = hashlib.md5()
+        with target.open('rb') as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b''):
+                digest.update(chunk)
+        if digest.hexdigest() != expected_md5:
+            target.unlink(missing_ok=True)
+            raise RuntimeError(f'BSTLD archive checksum mismatch: {digest.hexdigest()}')
+    return target
+
+
+def _bstld_easy_rows(rows):
+    """Keep clear positive examples and hold out complete recording sequences."""
+    state_ids = {'red': 1, 'yellow': 2, 'green': 3, 'off': 4}
+    candidates = []
+    for row in rows:
+        boxes = row.get('boxes') or []
+        if not 1 <= len(boxes) <= BSTLD_MAX_BOXES_PER_IMAGE:
+            continue
+        converted = []
+        easy = True
+        for box in boxes:
+            if box.get('occluded', False):
+                easy = False
+                break
+            width = float(box['x_max']) - float(box['x_min'])
+            height = float(box['y_max']) - float(box['y_min'])
+            if width < BSTLD_MIN_BOX_WIDTH or height < BSTLD_MIN_BOX_HEIGHT:
+                easy = False
+                break
+            label = str(box.get('label', '')).lower()
+            state = next((value for key, value in state_ids.items() if label.startswith(key)), None)
+            if state is None:
+                easy = False
+                break
+            converted.append((state, box['x_min'], box['y_min'], box['x_max'], box['y_max']))
+        if easy:
+            candidates.append({'path': row['path'], 'boxes': converted})
+
+    random.Random(SEED).shuffle(candidates)
+    candidates = candidates[:BSTLD_MAX_IMAGES]
+    if len(candidates) < 2:
+        return [], set()
+
+    # Split by recording bag rather than adjacent frames to avoid temporal leakage.
+    groups = {}
+    for row in candidates:
+        group = Path(row['path']).parent.name
+        groups.setdefault(group, []).append(row)
+    group_names = sorted(groups)
+    if len(group_names) < 2:
+        print('BSTLD: need at least two recording sequences for a leakage-safe validation split')
+        return [], set()
+    target_val = max(1, round(len(candidates) * 0.2))
+    val_groups = set()
+    best_gap = len(candidates)
+    for size in range(1, len(group_names)):
+        for subset in itertools.combinations(group_names, size):
+            count = sum(len(groups[name]) for name in subset)
+            gap = abs(count - target_val)
+            if gap < best_gap:
+                best_gap = gap
+                val_groups = set(subset)
+    return candidates, val_groups
+
+
+def parse_bstld():
+    """Download only BSTLD's small auxiliary archive, then retain easy frames."""
+    try:
+        import yaml
+    except ImportError:
+        subprocess.run(['python', '-m', 'pip', 'install', '-q', 'pyyaml'], check=True)
+        import yaml
+
+    cache = Path('/kaggle/working/bstld_cache')
+    archive = _download_bstld_file(
+        BSTLD_ARCHIVE_URL, cache / 'dataset_additional_rgb.zip', BSTLD_ARCHIVE_MD5
+    )
+    labels = _download_bstld_file(BSTLD_LABELS_URL, cache / 'additional_train.yaml')
+    rows = yaml.safe_load(labels.read_text(encoding='utf-8')) or []
+    selected, val_groups = _bstld_easy_rows(rows)
+    if not selected:
+        print('BSTLD: no easy, visible positive examples found')
+        return 0
+
+    copied = 0
+    with zipfile.ZipFile(archive) as zipped:
+        members = {name.replace('\\', '/').lstrip('./'): name for name in zipped.namelist()}
+        for index, row in enumerate(selected):
+            relative = str(row['path']).replace('\\', '/').lstrip('./')
+            member = members.get(relative)
+            if member is None:
+                # Archives may add a top-level directory; still require an exact path suffix.
+                matches = [name for key, name in members.items() if key.endswith('/' + relative)]
+                if len(matches) != 1:
+                    print(f'SKIP BSTLD missing/ambiguous image: {relative}')
+                    continue
+                member = matches[0]
+            group = Path(relative).parent.name
+            split = 'val' if group in val_groups else 'train'
+            with zipped.open(member) as source:
+                image_path = cache / f'bstld_{index:04d}.png'
+                with image_path.open('wb') as target:
+                    shutil.copyfileobj(source, target)
+            copied += add_image(image_path, row['boxes'], split, 'bstld', index)
+            image_path.unlink(missing_ok=True)
+    print(f'BSTLD additional: {copied}/{len(selected)} easy images, held out by recording sequence')
+    return copied
 
 
 def parse_gtsrb():
@@ -159,21 +298,32 @@ def add_synset(split_name, limit, target_split):
 
 
 def main():
+    subprocess.run(['python', '-m', 'pip', 'install', '-q', 'ultralytics'], check=True)
     for p in [ROOT / 'images/train', ROOT / 'images/val', ROOT / 'labels/train', ROOT / 'labels/val']:
         p.mkdir(parents=True, exist_ok=True)
     n_gtsdb = parse_gtsdb()
     n_gtsrb = parse_gtsrb()
     n_syn_train = add_synset('train', SYNSET_TRAIN_LIMIT, 'train')
     n_syn_val = add_synset('validation', SYNSET_VAL_LIMIT, 'val')
+    n_bstld = parse_bstld()
     ntrain = len(list((ROOT / 'images/train').glob('*')))
     nval = len(list((ROOT / 'images/val').glob('*')))
     if not ntrain or not nval:
         raise RuntimeError(f'No usable train/validation data: train={ntrain}, val={nval}')
     data_yaml = ROOT / 'data.yaml'
-    data_yaml.write_text(f"path: {ROOT.as_posix()}\ntrain: images/train\nval: images/val\nnc: 1\nnames: ['sign']\n", encoding='utf-8')
-    print(json.dumps({'source_counts': {'gtsdb': n_gtsdb, 'gtsrb_roi': n_gtsrb, 'synset_train': n_syn_train, 'synset_val': n_syn_val}, 'train_images': ntrain, 'val_images': nval, 'negatives_in_gtsdb': True}, indent=2))
+    class_names = ['traffic sign', 'traffic_light_red', 'traffic_light_yellow',
+                   'traffic_light_green', 'traffic_light_off'] if n_bstld else ['traffic sign']
+    data_yaml.write_text(
+        f"path: {ROOT.as_posix()}\ntrain: images/train\nval: images/val\n"
+        f"nc: {len(class_names)}\nnames: {json.dumps(class_names)}\n",
+        encoding='utf-8'
+    )
+    print(json.dumps({'source_counts': {'gtsdb': n_gtsdb, 'gtsrb_roi': n_gtsrb,
+                                       'synset_train': n_syn_train, 'synset_val': n_syn_val,
+                                       'bstld_easy': n_bstld},
+                      'train_images': ntrain, 'val_images': nval,
+                      'class_names': class_names, 'negatives_in_gtsdb': True}, indent=2))
 
-    subprocess.run(['python', '-m', 'pip', 'install', '-q', 'ultralytics'], check=True)
     from ultralytics import YOLO
     results = []
     for size in (320, 512):
