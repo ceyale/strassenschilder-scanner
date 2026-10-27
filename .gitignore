@@ -8,6 +8,16 @@ node_modules/
 /*_openvino_model/
 /models/*_openvino_model/
 /.wrangler/
-/__pycache__/
+__pycache__/
+*.py[cod]
 /cloudflare-pages-upload/
 /cloudflare-pages-upload.zip
+
+# Keep the Kaggle experiment workspace out of commits, except the selected v3 model bundle.
+/.kaggle_cpu_moe/**
+/.kaggle_traffic_cpu/**
+!/.kaggle_cpu_moe/cpu_direct_output_v3/
+!/.kaggle_cpu_moe/cpu_direct_output_v3/models/
+!/.kaggle_cpu_moe/cpu_direct_output_v3/models/sign_crop_classifier.onnx
+!/.kaggle_cpu_moe/cpu_direct_output_v3/models/sign_crop_classifier.onnx.data
+!/.kaggle_cpu_moe/cpu_direct_output_v3/models/sign_classes.json

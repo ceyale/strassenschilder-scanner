@@ -10,9 +10,14 @@ from PIL import Image
 
 
 ROOT = Path(__file__).resolve().parent
-MODEL_PATH = Path(os.environ.get("SIGN_YOLO_MODEL", ROOT / "models" / "yolo26s-signs.pt"))
+_DEFAULT_DETECTOR = ROOT / "models" / "yolo11n_sign_light_detector.pt"
+_LEGACY_DETECTOR = ROOT / "models" / "yolo26s-signs.pt"
+MODEL_PATH = Path(os.environ.get(
+    "SIGN_YOLO_MODEL", _DEFAULT_DETECTOR if _DEFAULT_DETECTOR.is_file() else _LEGACY_DETECTOR
+))
 FALLBACK_MODEL = "yolo26s.pt"
 CLASSIFIER_PATH = ROOT / "models" / "gtsrb-sign-cnn.onnx"
+LIGHT_CLASSIFIER_PATH = ROOT / "models" / "traffic_light_state.onnx"
 INFERENCE_SIZE = int(os.environ.get("SIGN_YOLO_IMGSZ", "512"))
 SPEED_CLASSES = {0: 20, 1: 30, 2: 50, 3: 60, 4: 70, 5: 80, 7: 100, 8: 120}
 TURN_CLASSES = {33: "rechts", 34: "links", 36: "rechts", 37: "links", 38: "rechts", 39: "links"}
@@ -73,7 +78,7 @@ def _traffic_light_state_from_class(name: str) -> str:
 
 
 class PCVision:
-    """YOLO candidate detector plus the existing GTSRB crop classifier."""
+    """YOLO candidate detector plus compact sign and traffic-light classifiers."""
 
     def __init__(self) -> None:
         try:
@@ -118,7 +123,31 @@ class PCVision:
             str(CLASSIFIER_PATH), providers=["CPUExecutionProvider"]
         )
         self.input_name = self.classifier.get_inputs()[0].name
+        self.light_classifier = None
+        self.light_input_name = None
+        if LIGHT_CLASSIFIER_PATH.is_file():
+            self.light_classifier = ort.InferenceSession(
+                str(LIGHT_CLASSIFIER_PATH), providers=["CPUExecutionProvider"]
+            )
+            self.light_input_name = self.light_classifier.get_inputs()[0].name
         self._ocr = None
+
+    def _classify_light_model(self, image: Image.Image) -> str:
+        if self.light_classifier is None:
+            return ""
+        crop = image.convert("RGB").resize((64, 64), Image.Resampling.BILINEAR)
+        pixels = np.asarray(crop, dtype=np.float32) / 255.0
+        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+        tensor = ((pixels - mean) / std).transpose(2, 0, 1)[None]
+        logits = self.light_classifier.run(None, {self.light_input_name: tensor})[0][0].astype(np.float64)
+        logits -= logits.max()
+        probabilities = np.exp(logits)
+        probabilities /= max(float(probabilities.sum()), 1e-12)
+        order = np.argsort(probabilities)
+        if probabilities[order[-1]] < 0.45 or probabilities[order[-1]] - probabilities[order[-2]] < 0.08:
+            return ""
+        return ("rot", "gelb", "gruen", "aus")[int(order[-1])]
 
     def _classify_sign(self, image: Image.Image) -> tuple[str, int | None, str, str, float]:
         crop = image.convert("RGB").resize((32, 32), Image.Resampling.BILINEAR)
@@ -194,7 +223,10 @@ class PCVision:
                 if "traffic light" in name or "ampel" in name:
                     if name.endswith((" off", " aus")):
                         continue
-                    state = _traffic_light_state_from_class(name) or _classify_light(crop)
+                    state = (_traffic_light_state_from_class(name) or
+                             self._classify_light_model(crop) or _classify_light(crop))
+                    if state == "aus":
+                        continue
                     if not state:
                         continue
                     detections.append({
